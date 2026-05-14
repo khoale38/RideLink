@@ -53,7 +53,9 @@ export function startSignalingServer(onEvent) {
       const entry = clients.get(clientId);
       if (entry) {
         _broadcast({ type: 'peer_left', id: clientId, name: entry.name }, clientId);
-        onEvent?.({ type: 'peer_left', id: clientId, name: entry.name });
+        if (!entry.isHost) {
+          onEvent?.({ type: 'peer_left', id: clientId, name: entry.name });
+        }
       }
       clients.delete(clientId);
     });
@@ -96,13 +98,18 @@ function _handleMessage(clientId, msg, onEvent) {
     case 'join': {
       if (typeof msg.name !== 'string' || !msg.name.trim()) return;
       entry.name = msg.name;
+      entry.isHost = !!msg.isHost;
       const peers = [];
       clients.forEach((c, id) => {
         if (id !== clientId && c.name) peers.push({ id, name: c.name });
       });
       _send(clientId, { type: 'peer_list', peers, yourId: clientId });
       _broadcast({ type: 'peer_joined', id: clientId, name: msg.name }, clientId);
-      onEvent?.({ type: 'peer_joined', id: clientId, name: msg.name });
+      // Skip notifying the local listener about the host's own loopback
+      // connection — the host already represents itself in the UI.
+      if (!entry.isHost) {
+        onEvent?.({ type: 'peer_joined', id: clientId, name: msg.name });
+      }
       break;
     }
     case 'offer':

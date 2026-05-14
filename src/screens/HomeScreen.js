@@ -2,6 +2,7 @@ import React, { useEffect, useState } from 'react';
 import {
   View, Text, TextInput, TouchableOpacity, StyleSheet, Platform,
 } from 'react-native';
+import { SafeAreaView } from 'react-native-safe-area-context';
 import DeviceInfo from 'react-native-device-info';
 
 // "Khoa's iPhone" → "Khoa". If the OS only gives back a generic model like
@@ -48,7 +49,7 @@ export function HomeScreen({ onHost, onJoin, busy = false }) {
   }, []);
 
   return (
-    <View style={styles.container}>
+    <SafeAreaView style={styles.container} edges={['top', 'bottom', 'left', 'right']}>
       <Text style={styles.logo}>RideLink</Text>
       <Text style={styles.sub}>Offline motorcycle intercom</Text>
 
@@ -84,7 +85,7 @@ export function HomeScreen({ onHost, onJoin, busy = false }) {
         <Text style={styles.btnText}>{busy ? 'Joining…' : 'Join Group'}</Text>
         <Text style={styles.btnSub}>Scans for RideLink hotspot</Text>
       </TouchableOpacity>
-    </View>
+    </SafeAreaView>
   );
 }
 

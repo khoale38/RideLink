@@ -50,7 +50,10 @@ export function useIntercom(store) {
         }
       });
 
-      await _connect('127.0.0.1', name, store);
+      await _connect('127.0.0.1', name, store, { isHost: true });
+      // The host is "live" as soon as its own server is up and the loopback
+      // signaling client has joined — don't make the user wait for a guest.
+      store.setConnected(true);
     } catch (err) {
       leaveGroup();
       throw err;
@@ -88,7 +91,7 @@ export function useIntercom(store) {
     store.setMuted(!store.muted);
   }, [store]);
 
-  async function _connect(host, name, storeRef) {
+  async function _connect(host, name, storeRef, opts = {}) {
     // IMPORTANT: register handlers BEFORE connect() so no incoming messages are dropped.
     const handlers = {};
 
@@ -141,7 +144,7 @@ export function useIntercom(store) {
     await client.connect();
     const stream = await rtc.startLocalAudio();
     setLocalStream(stream);
-    client.send({ type: 'join', name });
+    client.send({ type: 'join', name, isHost: !!opts.isHost });
   }
 
   return { hostGroup, joinGroup, leaveGroup, toggleMute, localStream };

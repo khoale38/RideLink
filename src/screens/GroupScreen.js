@@ -3,6 +3,7 @@ import {
   View, Text, TouchableOpacity, FlatList, StyleSheet,
   Platform, Switch,
 } from 'react-native';
+import { SafeAreaView } from 'react-native-safe-area-context';
 import Slider from '@react-native-community/slider';
 import { HOTSPOT_PREFIX, HOTSPOT_PASSWORD } from '../services/HotspotManager';
 
@@ -30,11 +31,10 @@ export function GroupScreen({ store, vox, voxEnabled, onToggleVox, onMuteToggle,
   const suggestedSSID = suggestSSID(myName);
 
   return (
-    <View style={styles.container}>
+    <SafeAreaView style={styles.container} edges={['top', 'bottom', 'left', 'right']}>
 
       {/* Header */}
       <View style={styles.header}>
-        <Text style={styles.logo}>RideLink</Text>
         <View style={[styles.badge, connected ? styles.badgeOn : styles.badgeOff]}>
           <Text style={styles.badgeText}>{connected ? 'LIVE' : 'Connecting…'}</Text>
         </View>
@@ -56,14 +56,6 @@ export function GroupScreen({ store, vox, voxEnabled, onToggleVox, onMuteToggle,
         </View>
       )}
 
-      {/* VOX indicator */}
-      <View style={[styles.voxIndicator, isSpeaking && styles.voxIndicatorActive]}>
-        <View style={[styles.voxDot, isSpeaking && styles.voxDotActive]} />
-        <Text style={[styles.voxLabel, isSpeaking && styles.voxLabelActive]}>
-          {muted ? 'MUTED' : voxEnabled ? (isSpeaking ? 'TRANSMITTING' : 'LISTENING…') : 'VOX OFF'}
-        </Text>
-      </View>
-
       {/* Rider list */}
       <Text style={styles.sectionLabel}>RIDERS ({peers.length + 1})</Text>
       <FlatList
@@ -78,7 +70,7 @@ export function GroupScreen({ store, vox, voxEnabled, onToggleVox, onMuteToggle,
           const label = !item.isMe && state ? STATE_LABEL[state] : null;
           const color = !item.isMe && state ? STATE_COLOR[state] : null;
           return (
-            <View style={styles.riderRow}>
+            <View style={[styles.riderRow, item.speaking && styles.riderRowSpeaking]}>
               <View style={[styles.avatar, item.speaking && styles.avatarSpeaking]}>
                 <Text style={styles.avatarText}>{item.name?.[0]?.toUpperCase()}</Text>
               </View>
@@ -88,7 +80,6 @@ export function GroupScreen({ store, vox, voxEnabled, onToggleVox, onMuteToggle,
                   <Text style={[styles.riderStatus, { color }]}>{label}</Text>
                 )}
               </View>
-              {item.speaking && <Text style={styles.speakingBadge}>speaking</Text>}
             </View>
           );
         }}
@@ -141,7 +132,7 @@ export function GroupScreen({ store, vox, voxEnabled, onToggleVox, onMuteToggle,
           <Text style={styles.controlLabel}>Leave</Text>
         </TouchableOpacity>
       </View>
-    </View>
+    </SafeAreaView>
   );
 }
 
@@ -179,8 +170,11 @@ const styles = StyleSheet.create({
   list: { flex: 1 },
   riderRow: {
     flexDirection: 'row', alignItems: 'center',
-    paddingVertical: 12, borderBottomWidth: 1, borderBottomColor: '#1a1a1a',
+    paddingVertical: 10, paddingHorizontal: 10, marginBottom: 6,
+    borderRadius: 10, borderWidth: 2, borderColor: 'transparent',
+    backgroundColor: '#141414',
   },
+  riderRowSpeaking: { borderColor: '#4caf50', backgroundColor: '#0d2010' },
   avatar: {
     width: 42, height: 42, borderRadius: 21,
     backgroundColor: '#2a2a2a', alignItems: 'center', justifyContent: 'center',
