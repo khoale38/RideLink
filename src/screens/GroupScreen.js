@@ -32,8 +32,11 @@ const STATE_COLOR = {
 };
 
 export function GroupScreen({ store, vox, voxEnabled, onToggleVox, onMuteToggle, onLeave }) {
-  const { myName, peers, muted, role, connected, hotspotPassword, hotspotSsid } = store;
-  const isSpeaking = voxEnabled && vox.speaking;
+  const { myName, peers, muted, role, connected, hotspotPassword, hotspotSsid, selfSpeaking } = store;
+  // `selfSpeaking` is driven by WebRTC `media-source` stats (works on iOS+Android
+  // once you have a peer). VOX speaking is the legacy Android-only RMS path.
+  // Show the border if either says we're talking — and only if mic isn't muted.
+  const isSpeaking = !muted && (selfSpeaking || (voxEnabled && vox.speaking));
   // On Android the LocalOnlyHotspot module hands us the real OS-generated SSID
   // via `hotspotSsid`. Elsewhere we fall back to a name-based suggestion that
   // the user must match manually in Settings.

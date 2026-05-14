@@ -160,6 +160,7 @@ export function useIntercom(store) {
         if (__DEV__) console.warn('[useIntercom] WebRTC error:', errInfo);
       },
       (peerId, state) => storeRef.setPeerConnectionState(peerId, state),
+      (speaking) => storeRef.setSelfSpeaking?.(speaking),
     );
     rtcRef.current = rtc;
 

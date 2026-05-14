@@ -16,9 +16,10 @@ const RTC_CONFIG = {
 };
 
 export class WebRTCManager {
-  constructor(signalingClient, onVoiceActivity, onError, onPeerState) {
+  constructor(signalingClient, onVoiceActivity, onError, onPeerState, onLocalVoiceActivity) {
     this.signaling = signalingClient;
     this.onVoiceActivity = onVoiceActivity;
+    this.onLocalVoiceActivity = onLocalVoiceActivity; // (speaking) — true when our mic is hot
     this.onError = onError;
     this.onPeerState = onPeerState; // (peerId, state) — 'connecting' | 'connected' | 'failed'
     this.peers = new Map(); // peerId -> RTCPeerConnection
@@ -29,6 +30,7 @@ export class WebRTCManager {
     this.myId = null; // set by setMyId() — used for polite-peer tie-break on glare
 
     this.speakingState = new Map(); // peerId -> bool (last reported)
+    this.localSpeaking = false;
     this.speakingPoll = null;
 
     this._bindSignalingHandlers();
@@ -43,23 +45,33 @@ export class WebRTCManager {
     const SPEAKING_THRESHOLD = 0.01; // audioLevel is 0..1 — anything noisy
     this.speakingPoll = setInterval(async () => {
       if (this.destroyed || this.peers.size === 0) return;
+      let localLevel = 0;
       for (const [peerId, pc] of this.peers) {
         try {
           const stats = await pc.getStats();
-          let level = 0;
+          let remoteLevel = 0;
           stats.forEach((report) => {
-            if (report.type === 'inbound-rtp' && (report.kind === 'audio' || report.mediaType === 'audio')) {
-              if (typeof report.audioLevel === 'number' && report.audioLevel > level) {
-                level = report.audioLevel;
-              }
+            const isAudio = report.kind === 'audio' || report.mediaType === 'audio';
+            if (!isAudio) return;
+            if (report.type === 'inbound-rtp' && typeof report.audioLevel === 'number') {
+              if (report.audioLevel > remoteLevel) remoteLevel = report.audioLevel;
+            } else if (report.type === 'media-source' && typeof report.audioLevel === 'number') {
+              // Our own mic input — same value across every pc, so taking the
+              // max across the loop is harmless and a noop after the first one.
+              if (report.audioLevel > localLevel) localLevel = report.audioLevel;
             }
           });
-          const speaking = level >= SPEAKING_THRESHOLD;
+          const speaking = remoteLevel >= SPEAKING_THRESHOLD;
           if (this.speakingState.get(peerId) !== speaking) {
             this.speakingState.set(peerId, speaking);
             this.onVoiceActivity?.(peerId, speaking);
           }
         } catch (_) { /* getStats can throw mid-teardown; ignore */ }
+      }
+      const localSpeaking = localLevel >= SPEAKING_THRESHOLD;
+      if (this.localSpeaking !== localSpeaking) {
+        this.localSpeaking = localSpeaking;
+        this.onLocalVoiceActivity?.(localSpeaking);
       }
     }, POLL_MS);
   }

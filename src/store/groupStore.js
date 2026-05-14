@@ -10,6 +10,7 @@ export function useGroupStore() {
   const [muted, setMuted] = useState(false);
   const [hotspotPassword, setHotspotPassword] = useState('');
   const [hotspotSsid, setHotspotSsid] = useState('');
+  const [selfSpeaking, setSelfSpeaking] = useState(false);
 
   const addPeer = useCallback((peer) => {
     setPeers((prev) => {
@@ -44,6 +45,8 @@ export function useGroupStore() {
     setMyId(null);
     setPeers([]);
     setMuted(false);
+    setSelfSpeaking(false);
+    setHotspotSsid('');
   }, []);
 
   return {
@@ -55,6 +58,7 @@ export function useGroupStore() {
     muted, setMuted,
     hotspotPassword, setHotspotPassword,
     hotspotSsid, setHotspotSsid,
+    selfSpeaking, setSelfSpeaking,
     reset,
   };
 }
