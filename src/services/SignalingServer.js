@@ -4,7 +4,13 @@
  * Guests connect to tcp://192.168.43.1:8765 (Android) or 172.20.10.1:8765 (iOS)
  */
 import TcpSocket from 'react-native-tcp-socket';
-import { v4 as uuidv4 } from 'uuid';
+
+function uuidv4() {
+  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (c) => {
+    const r = (Math.random() * 16) | 0;
+    return (c === 'x' ? r : (r & 0x3) | 0x8).toString(16);
+  });
+}
 
 export const SIGNALING_PORT = 8765;
 
@@ -22,16 +28,24 @@ export function startSignalingServer(onEvent) {
       const entry = clients.get(clientId);
       if (!entry) return;
 
-      // Buffer incoming data and split on newlines (framing)
       entry.buffer += raw.toString();
       const lines = entry.buffer.split('\n');
-      entry.buffer = lines.pop(); // last partial line stays in buffer
+      entry.buffer = lines.pop();
 
       for (const line of lines) {
         if (!line.trim()) continue;
         let msg;
-        try { msg = JSON.parse(line); } catch { continue; }
-        _handleMessage(clientId, msg, onEvent);
+        try {
+          msg = JSON.parse(line);
+        } catch {
+          if (__DEV__) console.warn('[SignalingServer] malformed message dropped');
+          continue;
+        }
+        try {
+          _handleMessage(clientId, msg, onEvent);
+        } catch (err) {
+          if (__DEV__) console.warn('[SignalingServer] handler threw:', err);
+        }
       }
     });
 
@@ -44,9 +58,19 @@ export function startSignalingServer(onEvent) {
       clients.delete(clientId);
     });
 
-    socket.on('error', () => {
+    socket.on('error', (err) => {
+      if (__DEV__) console.warn('[SignalingServer] client socket error:', err?.message ?? err);
+      const entry = clients.get(clientId);
+      if (entry) {
+        try { entry.socket.destroy(); } catch (_) { /* ignore */ }
+      }
       clients.delete(clientId);
     });
+  });
+
+  server.on('error', (err) => {
+    if (__DEV__) console.warn('[SignalingServer] server error:', err?.message ?? err);
+    onEvent?.({ type: 'server_error', error: err });
   });
 
   server.listen({ port: SIGNALING_PORT, host: '0.0.0.0' }, () => {
@@ -56,25 +80,27 @@ export function startSignalingServer(onEvent) {
 
 export function stopSignalingServer() {
   if (!server) return;
-  server.close();
-  server = null;
+  clients.forEach((entry) => {
+    try { entry.socket.destroy(); } catch (_) { /* ignore */ }
+  });
   clients.clear();
+  try { server.close(); } catch (_) { /* ignore */ }
+  server = null;
 }
 
 function _handleMessage(clientId, msg, onEvent) {
   const entry = clients.get(clientId);
-  if (!entry) return;
+  if (!entry || !msg || typeof msg.type !== 'string') return;
 
   switch (msg.type) {
     case 'join': {
+      if (typeof msg.name !== 'string' || !msg.name.trim()) return;
       entry.name = msg.name;
-      // Send the new peer a list of everyone already connected
       const peers = [];
       clients.forEach((c, id) => {
         if (id !== clientId && c.name) peers.push({ id, name: c.name });
       });
       _send(clientId, { type: 'peer_list', peers, yourId: clientId });
-      // Tell everyone else about the new peer
       _broadcast({ type: 'peer_joined', id: clientId, name: msg.name }, clientId);
       onEvent?.({ type: 'peer_joined', id: clientId, name: msg.name });
       break;
@@ -82,16 +108,27 @@ function _handleMessage(clientId, msg, onEvent) {
     case 'offer':
     case 'answer':
     case 'ice_candidate': {
+      if (typeof msg.to !== 'string' || !clients.has(msg.to)) {
+        if (__DEV__) console.warn(`[SignalingServer] ${msg.type} for unknown peer:`, msg.to);
+        return;
+      }
       _send(msg.to, { ...msg, from: clientId });
       break;
     }
+    default:
+      if (__DEV__) console.warn('[SignalingServer] unknown message type:', msg.type);
   }
 }
 
 function _send(clientId, msg) {
   const entry = clients.get(clientId);
-  if (entry?.socket) {
+  if (!entry?.socket) return;
+  try {
     entry.socket.write(JSON.stringify(msg) + '\n');
+  } catch (err) {
+    if (__DEV__) console.warn('[SignalingServer] write to', clientId, 'failed:', err?.message ?? err);
+    try { entry.socket.destroy(); } catch (_) { /* ignore */ }
+    clients.delete(clientId);
   }
 }
 

@@ -9,8 +9,8 @@
  *   -40 dB  = default (light wind / normal speech)
  *   -30 dB  = less sensitive (loud wind / highway)
  */
-import { useRef, useState, useCallback, useEffect } from 'react';
-import AudioRecord from 'react-native-audio-record';
+import { useRef, useState, useEffect } from 'react';
+import { Recorder } from '../services/AudioRecorder';
 
 const SAMPLE_RATE = 8000;        // Hz — low enough for level-only monitoring
 const CHANNELS = 1;
@@ -18,56 +18,62 @@ const BITS_PER_SAMPLE = 16;
 const HOLD_MS = 800;             // keep open this long after last loud frame
 const DEFAULT_THRESHOLD_DB = -40;
 
+// NOTE: useVOX only observes mic amplitude and reports `speaking`.
+// It does NOT mutate track.enabled — that's owned by App.tsx, which knows
+// about muted/voxEnabled/speaking together and is the single source of truth.
 export function useVOX(localStream, enabled = true) {
   const [speaking, setSpeaking] = useState(false);
   const [thresholdDb, setThresholdDb] = useState(DEFAULT_THRESHOLD_DB);
+
+  const thresholdRef = useRef(thresholdDb);
   const holdTimer = useRef(null);
   const speakingRef = useRef(false);
 
-  const _setGate = useCallback((open) => {
-    if (speakingRef.current === open) return;
-    speakingRef.current = open;
-    setSpeaking(open);
-
-    const track = localStream?.getAudioTracks()[0];
-    if (track) track.enabled = open;
-  }, [localStream]);
-
-  const _onAudioData = useCallback((data) => {
-    const db = _rmsDb(data);
-
-    if (db >= thresholdDb) {
-      // Above threshold — open gate immediately
-      clearTimeout(holdTimer.current);
-      _setGate(true);
-
-      // Restart hold timer
-      holdTimer.current = setTimeout(() => _setGate(false), HOLD_MS);
-    }
-    // Below threshold: hold timer will close gate after HOLD_MS
-  }, [thresholdDb, _setGate]);
+  useEffect(() => { thresholdRef.current = thresholdDb; }, [thresholdDb]);
 
   useEffect(() => {
-    if (!enabled || !localStream) return;
+    if (!enabled || !localStream) {
+      speakingRef.current = false;
+      setSpeaking(false);
+      return;
+    }
 
-    AudioRecord.init({
-      sampleRate: SAMPLE_RATE,
-      channels: CHANNELS,
-      bitsPerSample: BITS_PER_SAMPLE,
-      wavFile: '', // no file, stream only
-    });
+    const setGate = (open) => {
+      if (speakingRef.current === open) return;
+      speakingRef.current = open;
+      setSpeaking(open);
+    };
 
-    AudioRecord.on('data', _onAudioData);
-    AudioRecord.start();
+    const onAudioData = (data) => {
+      const db = _rmsDb(data);
+      if (db >= thresholdRef.current) {
+        clearTimeout(holdTimer.current);
+        setGate(true);
+        holdTimer.current = setTimeout(() => setGate(false), HOLD_MS);
+      }
+    };
+
+    try {
+      Recorder.configure({
+        sampleRate: SAMPLE_RATE,
+        channels: CHANNELS,
+        bitsPerSample: BITS_PER_SAMPLE,
+        wavFile: '',
+      });
+      Recorder.setListener(onAudioData);
+      Recorder.start();
+    } catch (err) {
+      if (__DEV__) console.warn('[VOX] failed to start AudioRecord:', err?.message ?? err);
+    }
 
     return () => {
-      AudioRecord.stop();
+      Recorder.setListener(null);
+      Recorder.stop();
       clearTimeout(holdTimer.current);
-      // Re-enable track on unmount so mute state doesn't stick
-      const track = localStream?.getAudioTracks()[0];
-      if (track) track.enabled = true;
+      speakingRef.current = false;
+      setSpeaking(false);
     };
-  }, [enabled, localStream, _onAudioData]);
+  }, [enabled, localStream]);
 
   return { speaking, thresholdDb, setThresholdDb };
 }

@@ -1,10 +1,51 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import {
   View, Text, TextInput, TouchableOpacity, StyleSheet, Platform,
 } from 'react-native';
+import DeviceInfo from 'react-native-device-info';
 
-export function HomeScreen({ onHost, onJoin }) {
+// "Khoa's iPhone" → "Khoa". If the OS only gives back a generic model like
+// "iPhone" (iOS 16+ privacy default), we leave it for the caller to substitute.
+function riderNameFromDevice(deviceName) {
+  if (!deviceName) return '';
+  const trimmed = deviceName.trim();
+  const apostropheIdx = trimmed.search(/['’]s\s/i);
+  if (apostropheIdx > 0) return trimmed.slice(0, apostropheIdx);
+  return trimmed;
+}
+
+// Anything that's just a bare model isn't a useful rider name.
+const GENERIC_NAMES = new Set(['iphone', 'ipad', 'ipod', 'simulator', '']);
+
+export function HomeScreen({ onHost, onJoin, busy = false }) {
   const [name, setName] = useState('');
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      let suggestion = '';
+      try {
+        const raw = await DeviceInfo.getDeviceName();
+        if (__DEV__) console.log('[HomeScreen] device name:', JSON.stringify(raw));
+        suggestion = riderNameFromDevice(raw);
+        if (GENERIC_NAMES.has(suggestion.toLowerCase())) suggestion = '';
+      } catch (err) {
+        if (__DEV__) console.warn('[HomeScreen] getDeviceName failed:', err);
+      }
+
+      // Fallback: use the device model if the user-assigned name was unavailable.
+      if (!suggestion) {
+        try {
+          suggestion = DeviceInfo.getModel?.() || '';
+          if (__DEV__) console.log('[HomeScreen] model fallback:', suggestion);
+        } catch (_) { /* ignore */ }
+      }
+
+      if (cancelled) return;
+      setName((current) => (current ? current : suggestion));
+    })();
+    return () => { cancelled = true; };
+  }, []);
 
   return (
     <View style={styles.container}>
@@ -21,10 +62,13 @@ export function HomeScreen({ onHost, onJoin }) {
       />
 
       <TouchableOpacity
-        style={[styles.btn, styles.btnHost]}
+        style={[styles.btn, styles.btnHost, busy && styles.btnDisabled]}
+        disabled={busy}
         onPress={() => name.trim() && onHost(name.trim())}
       >
-        <Text style={styles.btnText}>Create Group (Host)</Text>
+        <Text style={styles.btnText}>
+          {busy ? 'Starting…' : 'Create Group (Host)'}
+        </Text>
         <Text style={styles.btnSub}>
           {Platform.OS === 'android'
             ? 'Turns on WiFi hotspot'
@@ -33,10 +77,11 @@ export function HomeScreen({ onHost, onJoin }) {
       </TouchableOpacity>
 
       <TouchableOpacity
-        style={[styles.btn, styles.btnJoin]}
+        style={[styles.btn, styles.btnJoin, busy && styles.btnDisabled]}
+        disabled={busy}
         onPress={() => name.trim() && onJoin(name.trim())}
       >
-        <Text style={styles.btnText}>Join Group</Text>
+        <Text style={styles.btnText}>{busy ? 'Joining…' : 'Join Group'}</Text>
         <Text style={styles.btnSub}>Scans for RideLink hotspot</Text>
       </TouchableOpacity>
     </View>
@@ -59,6 +104,7 @@ const styles = StyleSheet.create({
     width: '100%', borderRadius: 14, padding: 18,
     alignItems: 'center', marginBottom: 16,
   },
+  btnDisabled: { opacity: 0.5 },
   btnHost: { backgroundColor: '#f5a623' },
   btnJoin: { backgroundColor: '#1e3a5f', borderWidth: 1, borderColor: '#2a5a9f' },
   btnText: { color: '#fff', fontSize: 18, fontWeight: '700' },

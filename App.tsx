@@ -1,6 +1,7 @@
-import React, { useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
-import { StatusBar } from 'react-native';
+import { Alert, StatusBar } from 'react-native';
+import KeepAwake from 'react-native-keep-awake';
 import { HomeScreen } from './src/screens/HomeScreen';
 import { GroupScreen } from './src/screens/GroupScreen';
 import { useGroupStore } from './src/store/groupStore';
@@ -12,17 +13,47 @@ function App() {
   const { hostGroup, joinGroup, leaveGroup, toggleMute, localStream } = useIntercom(store);
   const [screen, setScreen] = useState<'home' | 'group'>('home');
   const [voxEnabled, setVoxEnabled] = useState(true);
+  const [busy, setBusy] = useState(false);
 
   const vox = useVOX(localStream, screen === 'group' && voxEnabled && !store.muted);
 
+  // Single source of truth for whether the mic audio track is transmitting.
+  // - muted: never transmit
+  // - VOX off: always transmit
+  // - VOX on: transmit only while VOX gate is open (vox.speaking)
+  useEffect(() => {
+    const track = (localStream as any)?.getAudioTracks?.()[0];
+    if (!track) return;
+    const desired = screen === 'group' && !store.muted && (!voxEnabled || vox.speaking);
+    if (track.enabled !== desired) track.enabled = desired;
+  }, [localStream, screen, store.muted, voxEnabled, vox.speaking]);
+
   const handleHost = async (name: string) => {
-    setScreen('group');
-    await hostGroup(name);
+    if (busy) return;
+    setBusy(true);
+    try {
+      await hostGroup(name);
+      setScreen('group');
+    } catch (err: any) {
+      leaveGroup();
+      Alert.alert('Could not start group', err?.message ?? String(err));
+    } finally {
+      setBusy(false);
+    }
   };
 
   const handleJoin = async (name: string) => {
-    setScreen('group');
-    await joinGroup(name);
+    if (busy) return;
+    setBusy(true);
+    try {
+      await joinGroup(name);
+      setScreen('group');
+    } catch (err: any) {
+      leaveGroup();
+      Alert.alert('Could not join group', err?.message ?? String(err));
+    } finally {
+      setBusy(false);
+    }
   };
 
   const handleLeave = () => {
@@ -30,11 +61,28 @@ function App() {
     setScreen('home');
   };
 
+  // Keep the screen on whenever we're in a group — riders can't tap the screen
+  // to wake it while on a bike, and a locked screen kills audio/signaling.
+  useEffect(() => {
+    if (screen === 'group') {
+      KeepAwake.activate();
+      return () => KeepAwake.deactivate();
+    }
+  }, [screen]);
+
+  // Ensure signaling server / sockets are torn down if the app unmounts mid-session.
+  // We use a ref so the cleanup fires ONLY on real unmount, not every time
+  // leaveGroup's identity changes (it does, because the store object identity
+  // churns on every render).
+  const leaveGroupRef = useRef(leaveGroup);
+  useEffect(() => { leaveGroupRef.current = leaveGroup; }, [leaveGroup]);
+  useEffect(() => () => leaveGroupRef.current(), []);
+
   return (
     <SafeAreaProvider>
       <StatusBar barStyle="light-content" backgroundColor="#0d0d0d" />
       {screen === 'home' ? (
-        <HomeScreen onHost={handleHost} onJoin={handleJoin} />
+        <HomeScreen onHost={handleHost} onJoin={handleJoin} busy={busy} />
       ) : (
         <GroupScreen
           store={store}

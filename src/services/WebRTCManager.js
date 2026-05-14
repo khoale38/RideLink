@@ -16,61 +16,97 @@ const RTC_CONFIG = {
 };
 
 export class WebRTCManager {
-  constructor(signalingClient, onVoiceActivity) {
+  constructor(signalingClient, onVoiceActivity, onError, onPeerState) {
     this.signaling = signalingClient;
     this.onVoiceActivity = onVoiceActivity;
+    this.onError = onError;
+    this.onPeerState = onPeerState; // (peerId, state) — 'connecting' | 'connected' | 'failed'
     this.peers = new Map(); // peerId -> RTCPeerConnection
     this.localStream = null;
+    this.destroyed = false;
 
     this._bindSignalingHandlers();
   }
 
   async startLocalAudio() {
-    this.localStream = await mediaDevices.getUserMedia({
-      audio: {
-        echoCancellation: true,
-        noiseSuppression: true,
-        autoGainControl: true,
-      },
-      video: false,
-    });
-    return this.localStream;
+    try {
+      this.localStream = await mediaDevices.getUserMedia({
+        audio: {
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true,
+        },
+        video: false,
+      });
+      return this.localStream;
+    } catch (err) {
+      this._reportError('getUserMedia', err);
+      throw err;
+    }
   }
 
   async callPeer(peerId) {
+    if (this.destroyed) return;
+    // Skip if we already have a connection in progress / established — prevents
+    // duplicate offers on signaling reconnect when peer_list is replayed.
+    if (this.peers.has(peerId)) return;
+
     const pc = this._createPeerConnection(peerId);
-    this.localStream?.getTracks().forEach((t) => pc.addTrack(t, this.localStream));
-
-    const offer = await pc.createOffer();
-    await pc.setLocalDescription(offer);
-
-    this.signaling.send({ type: 'offer', to: peerId, sdp: offer });
+    if (!pc) return;
+    try {
+      this.localStream?.getTracks().forEach((t) => pc.addTrack(t, this.localStream));
+      const offer = await pc.createOffer();
+      if (this.destroyed) return;
+      await pc.setLocalDescription(offer);
+      this.signaling.send({ type: 'offer', to: peerId, sdp: offer });
+    } catch (err) {
+      this._reportError('callPeer', err, peerId);
+      this._removePeer(peerId);
+    }
   }
 
   async _handleOffer(msg) {
+    if (this.destroyed) return;
     const pc = this._createPeerConnection(msg.from);
-    this.localStream?.getTracks().forEach((t) => pc.addTrack(t, this.localStream));
-
-    await pc.setRemoteDescription(new RTCSessionDescription(msg.sdp));
-    const answer = await pc.createAnswer();
-    await pc.setLocalDescription(answer);
-
-    this.signaling.send({ type: 'answer', to: msg.from, sdp: answer });
+    if (!pc) return;
+    try {
+      this.localStream?.getTracks().forEach((t) => pc.addTrack(t, this.localStream));
+      await pc.setRemoteDescription(new RTCSessionDescription(msg.sdp));
+      const answer = await pc.createAnswer();
+      if (this.destroyed) return;
+      await pc.setLocalDescription(answer);
+      this.signaling.send({ type: 'answer', to: msg.from, sdp: answer });
+    } catch (err) {
+      this._reportError('handleOffer', err, msg.from);
+      this._removePeer(msg.from);
+    }
   }
 
   async _handleAnswer(msg) {
     const pc = this.peers.get(msg.from);
-    if (pc) await pc.setRemoteDescription(new RTCSessionDescription(msg.sdp));
+    if (!pc) return;
+    try {
+      await pc.setRemoteDescription(new RTCSessionDescription(msg.sdp));
+    } catch (err) {
+      this._reportError('handleAnswer', err, msg.from);
+      this._removePeer(msg.from);
+    }
   }
 
   async _handleIceCandidate(msg) {
     const pc = this.peers.get(msg.from);
-    if (pc && msg.candidate) {
+    if (!pc || !msg.candidate) return;
+    try {
       await pc.addIceCandidate(new RTCIceCandidate(msg.candidate));
+    } catch (err) {
+      // ICE candidate errors are common and recoverable (e.g. arrived before remote SDP).
+      // Log but don't tear down the connection.
+      this._reportError('addIceCandidate', err, msg.from, /* fatal */ false);
     }
   }
 
   _createPeerConnection(peerId) {
+    if (this.destroyed) return null;
     if (this.peers.has(peerId)) return this.peers.get(peerId);
 
     const pc = new RTCPeerConnection(RTC_CONFIG);
@@ -87,18 +123,44 @@ export class WebRTCManager {
     };
 
     pc.onconnectionstatechange = () => {
-      if (pc.connectionState === 'failed' || pc.connectionState === 'disconnected') {
-        this._removePeer(peerId);
+      const state = pc.connectionState;
+      // Map RTC's many states to the three we surface to the UI.
+      if (state === 'connecting' || state === 'new') {
+        this.onPeerState?.(peerId, 'connecting');
+      } else if (state === 'connected') {
+        this.onPeerState?.(peerId, 'connected');
+      } else if (state === 'failed' || state === 'disconnected' || state === 'closed') {
+        this.onPeerState?.(peerId, 'failed');
+        if (state === 'failed' || state === 'disconnected') {
+          this._removePeer(peerId);
+        }
       }
     };
 
     this.peers.set(peerId, pc);
+    this.onPeerState?.(peerId, 'connecting');
     return pc;
   }
 
   _removePeer(peerId) {
     const pc = this.peers.get(peerId);
-    if (pc) { pc.close(); this.peers.delete(peerId); }
+    if (pc) {
+      try { pc.close(); } catch (_) { /* already closed */ }
+      this.peers.delete(peerId);
+    }
+  }
+
+  _reportError(stage, err, peerId, fatal = true) {
+    if (__DEV__) {
+      console.warn(`[WebRTC] ${stage} failed${peerId ? ` for ${peerId}` : ''}:`, err?.message ?? err);
+    }
+    if (fatal) this.onError?.({ stage, peerId, error: err });
+  }
+
+  // Public: useIntercom calls this from its own peer_left handler so we don't
+  // clobber whatever else is registered on the signaling handlers object.
+  handlePeerLeft(peerId) {
+    this._removePeer(peerId);
   }
 
   _bindSignalingHandlers() {
@@ -106,13 +168,17 @@ export class WebRTCManager {
     handlers.offer = (msg) => this._handleOffer(msg);
     handlers.answer = (msg) => this._handleAnswer(msg);
     handlers.ice_candidate = (msg) => this._handleIceCandidate(msg);
-    handlers.peer_left = (msg) => this._removePeer(msg.id);
   }
 
   destroy() {
-    this.peers.forEach((pc) => pc.close());
+    this.destroyed = true;
+    this.peers.forEach((pc) => {
+      try { pc.close(); } catch (_) { /* already closed */ }
+    });
     this.peers.clear();
-    this.localStream?.getTracks().forEach((t) => t.stop());
+    this.localStream?.getTracks().forEach((t) => {
+      try { t.stop(); } catch (_) { /* ignore */ }
+    });
     this.localStream = null;
   }
 }

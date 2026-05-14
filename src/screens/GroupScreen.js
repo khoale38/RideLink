@@ -1,13 +1,33 @@
 import React from 'react';
 import {
   View, Text, TouchableOpacity, FlatList, StyleSheet,
-  Platform, Switch, Slider,
+  Platform, Switch,
 } from 'react-native';
+import Slider from '@react-native-community/slider';
 import { HOTSPOT_PREFIX, HOTSPOT_PASSWORD } from '../services/HotspotManager';
+
+// Suggest a hotspot SSID derived from the rider's name so guests have something
+// concrete to look for. The scanner matches anything starting with `RideLink-`.
+function suggestSSID(name) {
+  const slug = (name || 'rider').trim().split(/\s+/)[0].replace(/[^a-zA-Z0-9]/g, '');
+  return `${HOTSPOT_PREFIX}${slug || 'rider'}`;
+}
+
+const STATE_LABEL = {
+  connecting: 'connecting…',
+  connected: 'connected',
+  failed: 'lost',
+};
+const STATE_COLOR = {
+  connecting: '#f5a623',
+  connected: '#4caf50',
+  failed: '#c0392b',
+};
 
 export function GroupScreen({ store, vox, voxEnabled, onToggleVox, onMuteToggle, onLeave }) {
   const { myName, peers, muted, role, connected } = store;
   const isSpeaking = voxEnabled && vox.speaking;
+  const suggestedSSID = suggestSSID(myName);
 
   return (
     <View style={styles.container}>
@@ -23,16 +43,16 @@ export function GroupScreen({ store, vox, voxEnabled, onToggleVox, onMuteToggle,
       {/* Hotspot info (host only) */}
       {role === 'host' && (
         <View style={styles.hotspotInfo}>
-          <Text style={styles.hotspotLabel}>Hotspot name</Text>
-          <Text style={styles.hotspotValue}>{HOTSPOT_PREFIX}your-phone</Text>
+          <Text style={styles.hotspotLabel}>Set your hotspot name to</Text>
+          <Text style={styles.hotspotValue}>{suggestedSSID}</Text>
           <Text style={styles.hotspotLabel}>
             Password: <Text style={styles.hotspotValue}>{HOTSPOT_PASSWORD}</Text>
           </Text>
-          {Platform.OS === 'ios' && (
-            <Text style={styles.iosNote}>
-              Enable Personal Hotspot in Settings, then share this name with your group.
-            </Text>
-          )}
+          <Text style={styles.iosNote}>
+            {Platform.OS === 'ios'
+              ? 'Settings → General → About → Name, set to the value above, then turn on Personal Hotspot.'
+              : 'Settings → Network & Internet → Hotspot — set the SSID to the value above and password as listed.'}
+          </Text>
         </View>
       )}
 
@@ -47,18 +67,31 @@ export function GroupScreen({ store, vox, voxEnabled, onToggleVox, onMuteToggle,
       {/* Rider list */}
       <Text style={styles.sectionLabel}>RIDERS ({peers.length + 1})</Text>
       <FlatList
-        data={[{ id: 'me', name: `${myName} (you)`, speaking: isSpeaking }, ...peers]}
+        data={[
+          { id: 'me', name: `${myName} (you)`, speaking: isSpeaking, isMe: true },
+          ...peers,
+        ]}
         keyExtractor={(item) => item.id}
         style={styles.list}
-        renderItem={({ item }) => (
-          <View style={styles.riderRow}>
-            <View style={[styles.avatar, item.speaking && styles.avatarSpeaking]}>
-              <Text style={styles.avatarText}>{item.name?.[0]?.toUpperCase()}</Text>
+        renderItem={({ item }) => {
+          const state = item.connectionState;
+          const label = !item.isMe && state ? STATE_LABEL[state] : null;
+          const color = !item.isMe && state ? STATE_COLOR[state] : null;
+          return (
+            <View style={styles.riderRow}>
+              <View style={[styles.avatar, item.speaking && styles.avatarSpeaking]}>
+                <Text style={styles.avatarText}>{item.name?.[0]?.toUpperCase()}</Text>
+              </View>
+              <View style={styles.riderInfo}>
+                <Text style={styles.riderName}>{item.name}</Text>
+                {label && (
+                  <Text style={[styles.riderStatus, { color }]}>{label}</Text>
+                )}
+              </View>
+              {item.speaking && <Text style={styles.speakingBadge}>speaking</Text>}
             </View>
-            <Text style={styles.riderName}>{item.name}</Text>
-            {item.speaking && <Text style={styles.speakingBadge}>speaking</Text>}
-          </View>
-        )}
+          );
+        }}
       />
 
       {/* VOX settings */}
@@ -155,7 +188,9 @@ const styles = StyleSheet.create({
   },
   avatarSpeaking: { borderColor: '#4caf50' },
   avatarText: { color: '#fff', fontWeight: '700', fontSize: 18 },
-  riderName: { color: '#fff', fontSize: 16, flex: 1 },
+  riderInfo: { flex: 1 },
+  riderName: { color: '#fff', fontSize: 16 },
+  riderStatus: { fontSize: 11, marginTop: 2, fontWeight: '600' },
   speakingBadge: {
     color: '#4caf50', fontSize: 11, fontWeight: '700',
     backgroundColor: '#0d2010', paddingHorizontal: 8, paddingVertical: 3, borderRadius: 6,

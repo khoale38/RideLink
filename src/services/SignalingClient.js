@@ -1,8 +1,18 @@
 /**
  * TCP signaling client — connects to the host phone's embedded TCP server.
  * Uses newline-delimited JSON framing.
+ *
+ * Reconnect behavior: after the first successful connect, if the socket drops
+ * (tunnel, range, brief WiFi blip), we auto-reconnect with exponential backoff.
+ * The caller registers handlers.reconnecting / handlers.reconnected to update UI,
+ * and we re-send the original `join` payload on each successful reconnect so the
+ * server re-adds us to the peer list.
  */
 import TcpSocket from 'react-native-tcp-socket';
+
+const CONNECT_TIMEOUT_MS = 10000;
+const RECONNECT_BASE_MS = 1000;
+const RECONNECT_MAX_MS = 15000;
 
 export class SignalingClient {
   constructor(host, port, handlers) {
@@ -11,14 +21,56 @@ export class SignalingClient {
     this.handlers = handlers;
     this.socket = null;
     this.buffer = '';
+    this.connected = false;
+    this.everConnected = false;       // gate reconnect attempts on first success
+    this.intentionallyClosed = false; // set by disconnect() to stop reconnects
+    this.joinPayload = null;          // last 'join' message, replayed on reconnect
+    this.reconnectTimer = null;
+    this.reconnectAttempt = 0;
   }
 
   connect() {
+    this.intentionallyClosed = false;
+    return this._openSocket();
+  }
+
+  _openSocket() {
     return new Promise((resolve, reject) => {
-      this.socket = TcpSocket.createConnection(
-        { host: this.host, port: this.port },
-        () => resolve(),
-      );
+      let settled = false;
+      const finish = (err) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timeout);
+        if (err) reject(err); else resolve();
+      };
+
+      const timeout = setTimeout(() => {
+        try { this.socket?.destroy(); } catch (_) { /* ignore */ }
+        finish(new Error(`Signaling connect timed out after ${CONNECT_TIMEOUT_MS}ms (${this.host}:${this.port})`));
+      }, CONNECT_TIMEOUT_MS);
+
+      try {
+        this.socket = TcpSocket.createConnection(
+          { host: this.host, port: this.port },
+          () => {
+            this.connected = true;
+            this.reconnectAttempt = 0;
+            const wasReconnect = this.everConnected;
+            this.everConnected = true;
+            finish();
+            if (wasReconnect) {
+              // Replay join so the server re-adds us to the peer list.
+              if (this.joinPayload) this.send(this.joinPayload);
+              this.handlers.reconnected?.();
+            }
+          },
+        );
+      } catch (err) {
+        finish(err instanceof Error ? err : new Error(String(err)));
+        return;
+      }
+
+      this.buffer = ''; // fresh framing buffer per connection
 
       this.socket.on('data', (raw) => {
         this.buffer += raw.toString();
@@ -28,28 +80,75 @@ export class SignalingClient {
         for (const line of lines) {
           if (!line.trim()) continue;
           let msg;
-          try { msg = JSON.parse(line); } catch { continue; }
-          this.handlers[msg.type]?.(msg);
+          try {
+            msg = JSON.parse(line);
+          } catch (err) {
+            if (__DEV__) console.warn('[Signaling] dropped malformed message:', line);
+            continue;
+          }
+          try {
+            this.handlers[msg.type]?.(msg);
+          } catch (err) {
+            if (__DEV__) console.warn('[Signaling] handler for', msg.type, 'threw:', err);
+          }
         }
       });
 
       this.socket.on('error', (err) => {
-        reject(err);
-        this.handlers.disconnected?.();
+        if (!settled) {
+          finish(err instanceof Error ? err : new Error(String(err)));
+        }
+        this.connected = false;
+        this._scheduleReconnect();
       });
 
       this.socket.on('close', () => {
+        this.connected = false;
         this.handlers.disconnected?.();
+        this._scheduleReconnect();
       });
     });
   }
 
+  _scheduleReconnect() {
+    if (this.intentionallyClosed) return;
+    if (!this.everConnected) return;        // initial connect failed → let caller decide
+    if (this.reconnectTimer) return;        // already scheduled
+
+    const attempt = ++this.reconnectAttempt;
+    const delay = Math.min(RECONNECT_BASE_MS * 2 ** (attempt - 1), RECONNECT_MAX_MS);
+    if (__DEV__) console.warn(`[Signaling] reconnect attempt ${attempt} in ${delay}ms`);
+    this.handlers.reconnecting?.({ attempt, delayMs: delay });
+
+    this.reconnectTimer = setTimeout(() => {
+      this.reconnectTimer = null;
+      if (this.intentionallyClosed) return;
+      this._openSocket().catch(() => {
+        // _openSocket's error handler already schedules the next attempt
+      });
+    }, delay);
+  }
+
   send(msg) {
-    this.socket?.write(JSON.stringify(msg) + '\n');
+    if (!this.socket || !this.connected) return false;
+    if (msg?.type === 'join') this.joinPayload = msg; // remember for replay
+    try {
+      this.socket.write(JSON.stringify(msg) + '\n');
+      return true;
+    } catch (err) {
+      if (__DEV__) console.warn('[Signaling] write failed:', err?.message ?? err);
+      return false;
+    }
   }
 
   disconnect() {
-    this.socket?.destroy();
+    this.intentionallyClosed = true;
+    this.connected = false;
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+    }
+    try { this.socket?.destroy(); } catch (_) { /* ignore */ }
     this.socket = null;
   }
 }

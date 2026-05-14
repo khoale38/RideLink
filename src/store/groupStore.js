@@ -10,7 +10,16 @@ export function useGroupStore() {
   const [muted, setMuted] = useState(false);
 
   const addPeer = useCallback((peer) => {
-    setPeers((prev) => [...prev.filter((p) => p.id !== peer.id), peer]);
+    setPeers((prev) => {
+      const existing = prev.find((p) => p.id === peer.id);
+      const merged = {
+        connectionState: 'connecting',
+        speaking: false,
+        ...existing,
+        ...peer,
+      };
+      return [...prev.filter((p) => p.id !== peer.id), merged];
+    });
   }, []);
 
   const removePeer = useCallback((id) => {
@@ -23,12 +32,25 @@ export function useGroupStore() {
     );
   }, []);
 
+  const setPeerConnectionState = useCallback((id, connectionState) => {
+    setPeers((prev) =>
+      prev.map((p) => (p.id === id ? { ...p, connectionState } : p)),
+    );
+  }, []);
+
+  const reset = useCallback(() => {
+    setMyId(null);
+    setPeers([]);
+    setMuted(false);
+  }, []);
+
   return {
     myName, setMyName,
     myId, setMyId,
-    peers, addPeer, removePeer, setPeerSpeaking,
+    peers, addPeer, removePeer, setPeerSpeaking, setPeerConnectionState,
     role, setRole,
     connected, setConnected,
     muted, setMuted,
+    reset,
   };
 }
