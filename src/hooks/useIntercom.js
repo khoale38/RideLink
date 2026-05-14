@@ -11,6 +11,7 @@ import {
   connectToHotspot,
 } from '../services/HotspotManager';
 import { startIntercomService, stopIntercomService } from '../services/IntercomService';
+import { startLocalHotspot, stopLocalHotspot } from '../services/LocalHotspot';
 
 export function useIntercom(store) {
   const signalingRef = useRef(null);
@@ -26,6 +27,7 @@ export function useIntercom(store) {
       hostingRef.current = false;
     }
     stopIntercomService();
+    stopLocalHotspot();
     rtcRef.current = null;
     signalingRef.current = null;
     setLocalStream(null);
@@ -46,6 +48,17 @@ export function useIntercom(store) {
       // Start the foreground service BEFORE opening the mic so Android grants
       // continuous mic capture even if the user immediately locks the screen.
       await startIntercomService(`RideLink (${name})`);
+
+      // Android: auto-start a LocalOnlyHotspot so the host doesn't need to flip
+      // anything in Settings. The OS generates SSID/password; we push them
+      // into the store so the QR code and banner show the real values.
+      if (Platform.OS === 'android') {
+        const info = await startLocalHotspot();
+        if (info) {
+          store.setHotspotSsid?.(info.ssid);
+          store.setHotspotPassword?.(info.password);
+        }
+      }
 
       hostingRef.current = true;
       startSignalingServer((event) => {
@@ -142,7 +155,7 @@ export function useIntercom(store) {
 
     const rtc = new WebRTCManager(
       client,
-      (peerId) => storeRef.setPeerSpeaking(peerId, true),
+      (peerId, speaking) => storeRef.setPeerSpeaking(peerId, speaking),
       (errInfo) => {
         if (__DEV__) console.warn('[useIntercom] WebRTC error:', errInfo);
       },

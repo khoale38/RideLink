@@ -40,19 +40,20 @@ export function WifiQrCode({ ssid, password, size = 180 }) {
   const cell = Math.floor(size / total);
   const actualSize = cell * total;
 
+  const cellStyles = useMemo(
+    () => StyleSheet.create({
+      dark: { width: cell, height: cell, backgroundColor: '#000' },
+      light: { width: cell, height: cell, backgroundColor: '#fff' },
+    }),
+    [cell],
+  );
+
   return (
     <View style={[styles.frame, { width: actualSize, height: actualSize, padding: cell * quiet }]}>
       {matrix.map((row, r) => (
         <View key={r} style={styles.row}>
           {row.map((dark, c) => (
-            <View
-              key={c}
-              style={{
-                width: cell,
-                height: cell,
-                backgroundColor: dark ? '#000' : '#fff',
-              }}
-            />
+            <View key={c} style={dark ? cellStyles.dark : cellStyles.light} />
           ))}
         </View>
       ))}

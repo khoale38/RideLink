@@ -32,9 +32,13 @@ const STATE_COLOR = {
 };
 
 export function GroupScreen({ store, vox, voxEnabled, onToggleVox, onMuteToggle, onLeave }) {
-  const { myName, peers, muted, role, connected, hotspotPassword } = store;
+  const { myName, peers, muted, role, connected, hotspotPassword, hotspotSsid } = store;
   const isSpeaking = voxEnabled && vox.speaking;
-  const suggestedSSID = suggestSSID(myName);
+  // On Android the LocalOnlyHotspot module hands us the real OS-generated SSID
+  // via `hotspotSsid`. Elsewhere we fall back to a name-based suggestion that
+  // the user must match manually in Settings.
+  const activeSSID = hotspotSsid || suggestSSID(myName);
+  const activePassword = hotspotPassword || HOTSPOT_PASSWORD;
 
   return (
     <SafeAreaView style={styles.container} edges={['top', 'bottom', 'left', 'right']}>
@@ -52,19 +56,21 @@ export function GroupScreen({ store, vox, voxEnabled, onToggleVox, onMuteToggle,
           <View style={styles.hotspotRow}>
             <View style={styles.hotspotText}>
               <Text style={styles.hotspotLabel}>Hotspot name</Text>
-              <Text style={styles.hotspotValue}>{suggestedSSID}</Text>
+              <Text style={styles.hotspotValue}>{activeSSID}</Text>
               <Text style={[styles.hotspotLabel, { marginTop: 6 }]}>Password</Text>
-              <Text style={styles.hotspotValue}>{hotspotPassword || HOTSPOT_PASSWORD}</Text>
+              <Text style={styles.hotspotValue}>{activePassword}</Text>
               <Text style={styles.iosNote}>
                 {Platform.OS === 'ios'
                   ? 'iOS: Settings → Personal Hotspot — turn it on (rename your device to match if needed).'
-                  : 'Android: Settings → Network → Hotspot — match the SSID and password above.'}
+                  : hotspotSsid
+                    ? 'Hotspot started automatically. Guests scan the QR to join.'
+                    : 'Android: Settings → Network → Hotspot — match the SSID and password above.'}
               </Text>
             </View>
             <View style={styles.qrWrapper}>
               <WifiQrCode
-                ssid={suggestedSSID}
-                password={hotspotPassword || HOTSPOT_PASSWORD}
+                ssid={activeSSID}
+                password={activePassword}
                 size={130}
               />
               <Text style={styles.qrCaption}>Scan to join WiFi</Text>

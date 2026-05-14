@@ -9,6 +9,10 @@ import {
   checkMicPermission,
   requestMicPermission,
 } from '../services/HotspotManager';
+import {
+  checkNotificationPermission,
+  requestNotificationPermission,
+} from '../services/IntercomService';
 
 // "Khoa's iPhone" → "Khoa". If the OS only gives back a generic model like
 // "iPhone" (iOS 16+ privacy default), we leave it for the caller to substitute.
@@ -29,6 +33,9 @@ export function HomeScreen({ onHost, onJoin, busy = false }) {
   const [micGranted, setMicGranted] = useState(true); // optimistic — hides card until check completes
   const [micAsked, setMicAsked] = useState(false);    // becomes true after the user has tapped Allow at least once
   const [requestingMic, setRequestingMic] = useState(false);
+  const [notifGranted, setNotifGranted] = useState(true);
+  const [notifAsked, setNotifAsked] = useState(false);
+  const [requestingNotif, setRequestingNotif] = useState(false);
 
   // Refresh permission status on mount and whenever the user returns from
   // Settings (no AppState wiring — a simple effect re-check on focus would
@@ -37,8 +44,24 @@ export function HomeScreen({ onHost, onJoin, busy = false }) {
   useEffect(() => {
     let cancelled = false;
     checkMicPermission().then((ok) => { if (!cancelled) setMicGranted(ok); });
+    checkNotificationPermission().then((ok) => { if (!cancelled) setNotifGranted(ok); });
     return () => { cancelled = true; };
   }, []);
+
+  const handleEnableNotif = async () => {
+    if (requestingNotif) return;
+    setRequestingNotif(true);
+    try {
+      const ok = await requestNotificationPermission();
+      setNotifGranted(ok);
+      if (!ok && notifAsked) {
+        Linking.openSettings().catch(() => { /* ignore */ });
+      }
+      setNotifAsked(true);
+    } finally {
+      setRequestingNotif(false);
+    }
+  };
 
   const handleEnableMic = async () => {
     if (requestingMic) return;
@@ -107,6 +130,25 @@ export function HomeScreen({ onHost, onJoin, busy = false }) {
         </View>
       )}
 
+      {!notifGranted && (
+        <View style={styles.micCard}>
+          <Text style={styles.micTitle}>Notification access needed</Text>
+          <Text style={styles.micBody}>
+            Android needs to show an ongoing notification so the intercom keeps
+            running when your screen is off. {notifAsked ? 'Open Settings to allow it.' : 'Tap Allow to grant access.'}
+          </Text>
+          <TouchableOpacity
+            style={[styles.micBtn, requestingNotif && styles.btnDisabled]}
+            disabled={requestingNotif}
+            onPress={handleEnableNotif}
+          >
+            <Text style={styles.micBtnText}>
+              {requestingNotif ? 'Requesting…' : notifAsked ? 'Open Settings' : 'Allow notifications'}
+            </Text>
+          </TouchableOpacity>
+        </View>
+      )}
+
       <TextInput
         style={styles.input}
         placeholder="Your rider name"
@@ -128,7 +170,7 @@ export function HomeScreen({ onHost, onJoin, busy = false }) {
 
       <TouchableOpacity
         style={[styles.btn, styles.btnHost, busy && styles.btnDisabled]}
-        disabled={busy || password.length < 8 || !micGranted}
+        disabled={busy || password.length < 8 || !micGranted || !notifGranted}
         onPress={() => name.trim() && password.length >= 8 && onHost(name.trim(), password)}
       >
         <Text style={styles.btnText}>
@@ -143,7 +185,7 @@ export function HomeScreen({ onHost, onJoin, busy = false }) {
 
       <TouchableOpacity
         style={[styles.btn, styles.btnJoin, busy && styles.btnDisabled]}
-        disabled={busy || password.length < 8 || !micGranted}
+        disabled={busy || password.length < 8 || !micGranted || !notifGranted}
         onPress={() => name.trim() && password.length >= 8 && onJoin(name.trim(), password)}
       >
         <Text style={styles.btnText}>{busy ? 'Joining…' : 'Join Group'}</Text>

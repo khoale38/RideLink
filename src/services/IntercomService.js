@@ -6,9 +6,17 @@ const { IntercomService } = NativeModules;
 // foreground service alive) unless the user has granted POST_NOTIFICATIONS.
 // Without the notification, Play Services kills the service almost
 // immediately, so we treat this as part of the start-up flow.
-async function ensureNotificationPermission() {
+export async function checkNotificationPermission() {
   if (Platform.OS !== 'android') return true;
-  if (Platform.Version < 33) return true; // pre-Android 13: implicit grant
+  if (Platform.Version < 33) return true;
+  const perm = PermissionsAndroid.PERMISSIONS.POST_NOTIFICATIONS;
+  if (!perm) return true;
+  return PermissionsAndroid.check(perm);
+}
+
+export async function requestNotificationPermission() {
+  if (Platform.OS !== 'android') return true;
+  if (Platform.Version < 33) return true;
   const perm = PermissionsAndroid.PERMISSIONS.POST_NOTIFICATIONS;
   if (!perm) return true;
   const already = await PermissionsAndroid.check(perm);
@@ -28,7 +36,7 @@ export async function startIntercomService(groupName) {
   // almost immediately on a locked screen — surface this as a real error so
   // the host/join flow can show the user what's wrong instead of pretending
   // it worked and dying mid-ride.
-  const notifOk = await ensureNotificationPermission();
+  const notifOk = await requestNotificationPermission();
   if (!notifOk) {
     throw new Error('Notification permission denied — required to keep the intercom alive when the screen is off.');
   }

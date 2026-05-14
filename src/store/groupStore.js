@@ -9,6 +9,7 @@ export function useGroupStore() {
   const [connected, setConnected] = useState(false);
   const [muted, setMuted] = useState(false);
   const [hotspotPassword, setHotspotPassword] = useState('');
+  const [hotspotSsid, setHotspotSsid] = useState('');
 
   const addPeer = useCallback((peer) => {
     setPeers((prev) => {
@@ -53,6 +54,7 @@ export function useGroupStore() {
     connected, setConnected,
     muted, setMuted,
     hotspotPassword, setHotspotPassword,
+    hotspotSsid, setHotspotSsid,
     reset,
   };
 }
