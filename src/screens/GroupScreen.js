@@ -6,6 +6,7 @@ import {
 import { SafeAreaView } from 'react-native-safe-area-context';
 import Slider from '@react-native-community/slider';
 import { HOTSPOT_PREFIX, HOTSPOT_PASSWORD } from '../services/HotspotManager';
+import { WifiQrCode } from '../components/WifiQrCode';
 
 // Suggest a hotspot SSID derived from the rider's name so guests have something
 // concrete to look for. The scanner matches anything starting with `RideLink-`.
@@ -48,16 +49,27 @@ export function GroupScreen({ store, vox, voxEnabled, onToggleVox, onMuteToggle,
       {/* Hotspot info (host only) */}
       {role === 'host' && (
         <View style={styles.hotspotInfo}>
-          <Text style={styles.hotspotLabel}>Set your hotspot name to</Text>
-          <Text style={styles.hotspotValue}>{suggestedSSID}</Text>
-          <Text style={styles.hotspotLabel}>
-            Password: <Text style={styles.hotspotValue}>{hotspotPassword || HOTSPOT_PASSWORD}</Text>
-          </Text>
-          <Text style={styles.iosNote}>
-            {Platform.OS === 'ios'
-              ? 'Settings → General → About → Name, set to the value above, then turn on Personal Hotspot.'
-              : 'Settings → Network & Internet → Hotspot — set the SSID to the value above and password as listed.'}
-          </Text>
+          <View style={styles.hotspotRow}>
+            <View style={styles.hotspotText}>
+              <Text style={styles.hotspotLabel}>Hotspot name</Text>
+              <Text style={styles.hotspotValue}>{suggestedSSID}</Text>
+              <Text style={[styles.hotspotLabel, { marginTop: 6 }]}>Password</Text>
+              <Text style={styles.hotspotValue}>{hotspotPassword || HOTSPOT_PASSWORD}</Text>
+              <Text style={styles.iosNote}>
+                {Platform.OS === 'ios'
+                  ? 'iOS: Settings → Personal Hotspot — turn it on (rename your device to match if needed).'
+                  : 'Android: Settings → Network → Hotspot — match the SSID and password above.'}
+              </Text>
+            </View>
+            <View style={styles.qrWrapper}>
+              <WifiQrCode
+                ssid={suggestedSSID}
+                password={hotspotPassword || HOTSPOT_PASSWORD}
+                size={130}
+              />
+              <Text style={styles.qrCaption}>Scan to join WiFi</Text>
+            </View>
+          </View>
         </View>
       )}
 
@@ -165,9 +177,13 @@ const styles = StyleSheet.create({
     backgroundColor: '#1a1a1a', borderRadius: 12, padding: 14,
     marginBottom: 14, borderLeftWidth: 3, borderLeftColor: '#f5a623',
   },
+  hotspotRow: { flexDirection: 'row', alignItems: 'flex-start' },
+  hotspotText: { flex: 1, paddingRight: 10 },
   hotspotLabel: { color: '#888', fontSize: 12 },
   hotspotValue: { color: '#fff', fontWeight: '700', fontSize: 14 },
   iosNote: { color: '#f5a623', fontSize: 11, marginTop: 6 },
+  qrWrapper: { alignItems: 'center' },
+  qrCaption: { color: '#aaa', fontSize: 10, marginTop: 4, fontWeight: '600' },
 
   voxIndicator: {
     flexDirection: 'row', alignItems: 'center',

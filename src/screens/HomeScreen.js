@@ -1,10 +1,14 @@
 import React, { useEffect, useState } from 'react';
 import {
-  View, Text, TextInput, TouchableOpacity, StyleSheet, Platform,
+  View, Text, TextInput, TouchableOpacity, StyleSheet, Platform, Linking,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import DeviceInfo from 'react-native-device-info';
-import { HOTSPOT_PASSWORD } from '../services/HotspotManager';
+import {
+  HOTSPOT_PASSWORD,
+  checkMicPermission,
+  requestMicPermission,
+} from '../services/HotspotManager';
 
 // "Khoa's iPhone" → "Khoa". If the OS only gives back a generic model like
 // "iPhone" (iOS 16+ privacy default), we leave it for the caller to substitute.
@@ -22,6 +26,36 @@ const GENERIC_NAMES = new Set(['iphone', 'ipad', 'ipod', 'simulator', '']);
 export function HomeScreen({ onHost, onJoin, busy = false }) {
   const [name, setName] = useState('');
   const [password, setPassword] = useState(HOTSPOT_PASSWORD);
+  const [micGranted, setMicGranted] = useState(true); // optimistic — hides card until check completes
+  const [micAsked, setMicAsked] = useState(false);    // becomes true after the user has tapped Allow at least once
+  const [requestingMic, setRequestingMic] = useState(false);
+
+  // Refresh permission status on mount and whenever the user returns from
+  // Settings (no AppState wiring — a simple effect re-check on focus would
+  // need navigation; for this screen, the check on mount + after the user
+  // taps the button is enough).
+  useEffect(() => {
+    let cancelled = false;
+    checkMicPermission().then((ok) => { if (!cancelled) setMicGranted(ok); });
+    return () => { cancelled = true; };
+  }, []);
+
+  const handleEnableMic = async () => {
+    if (requestingMic) return;
+    setRequestingMic(true);
+    try {
+      const ok = await requestMicPermission();
+      setMicGranted(ok);
+      if (!ok && micAsked) {
+        // User has been asked before and is still denied — the OS won't show
+        // the prompt again. Send them to Settings to flip it on.
+        Linking.openSettings().catch(() => { /* ignore */ });
+      }
+      setMicAsked(true);
+    } finally {
+      setRequestingMic(false);
+    }
+  };
 
   useEffect(() => {
     let cancelled = false;
@@ -55,6 +89,24 @@ export function HomeScreen({ onHost, onJoin, busy = false }) {
       <Text style={styles.logo}>RideLink</Text>
       <Text style={styles.sub}>Offline motorcycle intercom</Text>
 
+      {!micGranted && (
+        <View style={styles.micCard}>
+          <Text style={styles.micTitle}>Microphone access needed</Text>
+          <Text style={styles.micBody}>
+            RideLink needs your mic for voice chat. {micAsked ? 'Open Settings to allow it.' : 'Tap Allow to grant access.'}
+          </Text>
+          <TouchableOpacity
+            style={[styles.micBtn, requestingMic && styles.btnDisabled]}
+            disabled={requestingMic}
+            onPress={handleEnableMic}
+          >
+            <Text style={styles.micBtnText}>
+              {requestingMic ? 'Requesting…' : micAsked ? 'Open Settings' : 'Allow microphone'}
+            </Text>
+          </TouchableOpacity>
+        </View>
+      )}
+
       <TextInput
         style={styles.input}
         placeholder="Your rider name"
@@ -76,7 +128,7 @@ export function HomeScreen({ onHost, onJoin, busy = false }) {
 
       <TouchableOpacity
         style={[styles.btn, styles.btnHost, busy && styles.btnDisabled]}
-        disabled={busy || password.length < 8}
+        disabled={busy || password.length < 8 || !micGranted}
         onPress={() => name.trim() && password.length >= 8 && onHost(name.trim(), password)}
       >
         <Text style={styles.btnText}>
@@ -91,7 +143,7 @@ export function HomeScreen({ onHost, onJoin, busy = false }) {
 
       <TouchableOpacity
         style={[styles.btn, styles.btnJoin, busy && styles.btnDisabled]}
-        disabled={busy || password.length < 8}
+        disabled={busy || password.length < 8 || !micGranted}
         onPress={() => name.trim() && password.length >= 8 && onJoin(name.trim(), password)}
       >
         <Text style={styles.btnText}>{busy ? 'Joining…' : 'Join Group'}</Text>
@@ -122,4 +174,15 @@ const styles = StyleSheet.create({
   btnJoin: { backgroundColor: '#1e3a5f', borderWidth: 1, borderColor: '#2a5a9f' },
   btnText: { color: '#fff', fontSize: 18, fontWeight: '700' },
   btnSub: { color: 'rgba(255,255,255,0.6)', fontSize: 12, marginTop: 4 },
+  micCard: {
+    width: '100%', backgroundColor: '#2a1a00', borderRadius: 12,
+    padding: 14, marginBottom: 18, borderWidth: 1, borderColor: '#f5a623',
+  },
+  micTitle: { color: '#f5a623', fontWeight: '700', fontSize: 14, marginBottom: 4 },
+  micBody: { color: '#ddd', fontSize: 12, marginBottom: 10 },
+  micBtn: {
+    backgroundColor: '#f5a623', borderRadius: 8, paddingVertical: 10,
+    alignItems: 'center',
+  },
+  micBtnText: { color: '#0d0d0d', fontWeight: '700', fontSize: 14 },
 });

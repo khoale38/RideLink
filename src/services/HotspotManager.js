@@ -34,6 +34,19 @@ export async function requestLocationPermission() {
   return result === PermissionsAndroid.RESULTS.GRANTED;
 }
 
+// Best-effort silent check of mic permission status. We can't fully distinguish
+// "undetermined" from "denied" on iOS without an extra dependency, so iOS only
+// reports `true` once a successful probe has occurred this session — callers
+// should treat `false` as "ask the user" rather than as a hard denial.
+let _iosMicGranted = false;
+export async function checkMicPermission() {
+  if (Platform.OS === 'android') {
+    const { PermissionsAndroid } = await import('react-native');
+    return PermissionsAndroid.check(PermissionsAndroid.PERMISSIONS.RECORD_AUDIO);
+  }
+  return _iosMicGranted;
+}
+
 export async function requestMicPermission() {
   if (Platform.OS === 'android') {
     const { PermissionsAndroid } = await import('react-native');
@@ -55,6 +68,7 @@ export async function requestMicPermission() {
     const { mediaDevices } = await import('react-native-webrtc');
     const stream = await mediaDevices.getUserMedia({ audio: true });
     stream.getTracks().forEach((t) => { try { t.stop(); } catch (_) { /* ignore */ } });
+    _iosMicGranted = true;
     return true;
   } catch {
     return false;
