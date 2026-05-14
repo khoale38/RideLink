@@ -4,6 +4,7 @@ import {
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import DeviceInfo from 'react-native-device-info';
+import { HOTSPOT_PASSWORD } from '../services/HotspotManager';
 
 // "Khoa's iPhone" → "Khoa". If the OS only gives back a generic model like
 // "iPhone" (iOS 16+ privacy default), we leave it for the caller to substitute.
@@ -20,6 +21,7 @@ const GENERIC_NAMES = new Set(['iphone', 'ipad', 'ipod', 'simulator', '']);
 
 export function HomeScreen({ onHost, onJoin, busy = false }) {
   const [name, setName] = useState('');
+  const [password, setPassword] = useState(HOTSPOT_PASSWORD);
 
   useEffect(() => {
     let cancelled = false;
@@ -62,10 +64,20 @@ export function HomeScreen({ onHost, onJoin, busy = false }) {
         autoCapitalize="words"
       />
 
+      <TextInput
+        style={styles.input}
+        placeholder="Hotspot password (≥8 chars)"
+        placeholderTextColor="#666"
+        value={password}
+        onChangeText={setPassword}
+        autoCapitalize="none"
+        autoCorrect={false}
+      />
+
       <TouchableOpacity
         style={[styles.btn, styles.btnHost, busy && styles.btnDisabled]}
-        disabled={busy}
-        onPress={() => name.trim() && onHost(name.trim())}
+        disabled={busy || password.length < 8}
+        onPress={() => name.trim() && password.length >= 8 && onHost(name.trim(), password)}
       >
         <Text style={styles.btnText}>
           {busy ? 'Starting…' : 'Create Group (Host)'}
@@ -79,8 +91,8 @@ export function HomeScreen({ onHost, onJoin, busy = false }) {
 
       <TouchableOpacity
         style={[styles.btn, styles.btnJoin, busy && styles.btnDisabled]}
-        disabled={busy}
-        onPress={() => name.trim() && onJoin(name.trim())}
+        disabled={busy || password.length < 8}
+        onPress={() => name.trim() && password.length >= 8 && onJoin(name.trim(), password)}
       >
         <Text style={styles.btnText}>{busy ? 'Joining…' : 'Join Group'}</Text>
         <Text style={styles.btnSub}>Scans for RideLink hotspot</Text>

@@ -24,8 +24,15 @@ export class WebRTCManager {
     this.peers = new Map(); // peerId -> RTCPeerConnection
     this.localStream = null;
     this.destroyed = false;
+    this.myId = null; // set by setMyId() — used for polite-peer tie-break on glare
 
     this._bindSignalingHandlers();
+  }
+
+  // Called by useIntercom after the signaling server replies with our id.
+  // Required for offer-glare resolution; until it's set we behave as impolite.
+  setMyId(id) {
+    this.myId = id;
   }
 
   async startLocalAudio() {
@@ -67,6 +74,21 @@ export class WebRTCManager {
 
   async _handleOffer(msg) {
     if (this.destroyed) return;
+
+    // Offer glare: we already have a peer connection mid-negotiation with this
+    // peer. Perfect-negotiation tie-break — the lexicographically smaller id is
+    // "polite" and yields; the impolite side ignores the incoming offer.
+    const existing = this.peers.get(msg.from);
+    if (existing && existing.signalingState === 'have-local-offer') {
+      const polite = this.myId && this.myId < msg.from;
+      if (!polite) {
+        if (__DEV__) console.warn('[WebRTC] glare: ignoring offer from', msg.from);
+        return;
+      }
+      // Polite side: drop our in-flight offer and accept theirs.
+      this._removePeer(msg.from);
+    }
+
     const pc = this._createPeerConnection(msg.from);
     if (!pc) return;
     try {

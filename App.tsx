@@ -28,11 +28,11 @@ function App() {
     if (track.enabled !== desired) track.enabled = desired;
   }, [localStream, screen, store.muted, voxEnabled, vox.speaking]);
 
-  const handleHost = async (name: string) => {
+  const handleHost = async (name: string, password: string) => {
     if (busy) return;
     setBusy(true);
     try {
-      await hostGroup(name);
+      await hostGroup(name, password);
       setScreen('group');
     } catch (err: any) {
       leaveGroup();
@@ -42,11 +42,11 @@ function App() {
     }
   };
 
-  const handleJoin = async (name: string) => {
+  const handleJoin = async (name: string, password: string) => {
     if (busy) return;
     setBusy(true);
     try {
-      await joinGroup(name);
+      await joinGroup(name, password);
       setScreen('group');
     } catch (err: any) {
       leaveGroup();

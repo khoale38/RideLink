@@ -32,13 +32,14 @@ export function useIntercom(store) {
     store.reset?.();
   }, [store]);
 
-  const hostGroup = useCallback(async (name) => {
+  const hostGroup = useCallback(async (name, password) => {
     try {
       const micOk = await requestMicPermission();
       if (!micOk) throw new Error('Microphone permission denied');
 
       store.setRole('host');
       store.setMyName(name);
+      store.setHotspotPassword?.(password);
 
       hostingRef.current = true;
       startSignalingServer((event) => {
@@ -60,7 +61,7 @@ export function useIntercom(store) {
     }
   }, [store, leaveGroup]);
 
-  const joinGroup = useCallback(async (name) => {
+  const joinGroup = useCallback(async (name, password) => {
     try {
       if (Platform.OS === 'android') {
         const locationOk = await requestLocationPermission();
@@ -75,7 +76,7 @@ export function useIntercom(store) {
       if (Platform.OS === 'android') {
         const network = await scanForRideLinkHotspot();
         if (!network) throw new Error('No RideLink hotspot found nearby');
-        const connected = await connectToHotspot(network.SSID);
+        const connected = await connectToHotspot(network.SSID, password);
         if (!connected) throw new Error(`Failed to connect to ${network.SSID}`);
       }
 
@@ -97,6 +98,7 @@ export function useIntercom(store) {
 
     handlers.peer_list = ({ peers, yourId }) => {
       storeRef.setMyId(yourId);
+      rtcRef.current?.setMyId(yourId);
       peers.forEach((p) => {
         storeRef.addPeer({ id: p.id, name: p.name, speaking: false });
         rtcRef.current?.callPeer(p.id);

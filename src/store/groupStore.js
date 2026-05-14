@@ -8,6 +8,7 @@ export function useGroupStore() {
   const [role, setRole] = useState(null); // 'host' | 'guest'
   const [connected, setConnected] = useState(false);
   const [muted, setMuted] = useState(false);
+  const [hotspotPassword, setHotspotPassword] = useState('');
 
   const addPeer = useCallback((peer) => {
     setPeers((prev) => {
@@ -51,6 +52,7 @@ export function useGroupStore() {
     role, setRole,
     connected, setConnected,
     muted, setMuted,
+    hotspotPassword, setHotspotPassword,
     reset,
   };
 }

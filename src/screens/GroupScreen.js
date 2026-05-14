@@ -14,6 +14,11 @@ function suggestSSID(name) {
   return `${HOTSPOT_PREFIX}${slug || 'rider'}`;
 }
 
+// Empirically, mesh audio holds up to ~5 riders on phone hotspots before CPU
+// and bandwidth start to bite. Past this we warn the host; we don't hard-cap
+// because the right number depends on hardware and signal.
+const MESH_SOFT_LIMIT = 5;
+
 const STATE_LABEL = {
   connecting: 'connecting…',
   connected: 'connected',
@@ -26,7 +31,7 @@ const STATE_COLOR = {
 };
 
 export function GroupScreen({ store, vox, voxEnabled, onToggleVox, onMuteToggle, onLeave }) {
-  const { myName, peers, muted, role, connected } = store;
+  const { myName, peers, muted, role, connected, hotspotPassword } = store;
   const isSpeaking = voxEnabled && vox.speaking;
   const suggestedSSID = suggestSSID(myName);
 
@@ -46,7 +51,7 @@ export function GroupScreen({ store, vox, voxEnabled, onToggleVox, onMuteToggle,
           <Text style={styles.hotspotLabel}>Set your hotspot name to</Text>
           <Text style={styles.hotspotValue}>{suggestedSSID}</Text>
           <Text style={styles.hotspotLabel}>
-            Password: <Text style={styles.hotspotValue}>{HOTSPOT_PASSWORD}</Text>
+            Password: <Text style={styles.hotspotValue}>{hotspotPassword || HOTSPOT_PASSWORD}</Text>
           </Text>
           <Text style={styles.iosNote}>
             {Platform.OS === 'ios'
@@ -58,6 +63,11 @@ export function GroupScreen({ store, vox, voxEnabled, onToggleVox, onMuteToggle,
 
       {/* Rider list */}
       <Text style={styles.sectionLabel}>RIDERS ({peers.length + 1})</Text>
+      {peers.length + 1 > MESH_SOFT_LIMIT && (
+        <Text style={styles.meshWarning}>
+          Audio may degrade above {MESH_SOFT_LIMIT} riders — WebRTC mesh scales O(N²).
+        </Text>
+      )}
       <FlatList
         data={[
           { id: 'me', name: `${myName} (you)`, speaking: isSpeaking, isMe: true },
@@ -96,7 +106,12 @@ export function GroupScreen({ store, vox, voxEnabled, onToggleVox, onMuteToggle,
             thumbColor="#fff"
           />
         </View>
-        {voxEnabled && (
+        {voxEnabled && !vox.levelAvailable && (
+          <Text style={styles.voxNote}>
+            Level-based VOX not supported on iOS — mic stays open while VOX is on.
+          </Text>
+        )}
+        {voxEnabled && vox.levelAvailable && (
           <View style={styles.sliderRow}>
             <Text style={styles.settingLabel}>
               Sensitivity: <Text style={styles.dbValue}>{vox.thresholdDb} dB</Text>
@@ -167,6 +182,7 @@ const styles = StyleSheet.create({
   voxLabelActive: { color: '#4caf50' },
 
   sectionLabel: { color: '#555', fontSize: 11, fontWeight: '700', marginBottom: 8, letterSpacing: 1 },
+  meshWarning: { color: '#f5a623', fontSize: 11, marginBottom: 6 },
   list: { flex: 1 },
   riderRow: {
     flexDirection: 'row', alignItems: 'center',
@@ -196,6 +212,7 @@ const styles = StyleSheet.create({
   },
   voxRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
   sliderRow: { marginTop: 10 },
+  voxNote: { color: '#888', fontSize: 11, marginTop: 6, fontStyle: 'italic' },
   settingLabel: { color: '#aaa', fontSize: 13 },
   dbValue: { color: '#f5a623', fontWeight: '700' },
   sliderHint: { color: '#555', fontSize: 10, textAlign: 'right', marginBottom: 2 },

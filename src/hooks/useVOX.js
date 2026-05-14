@@ -10,7 +10,14 @@
  *   -30 dB  = less sensitive (loud wind / highway)
  */
 import { useRef, useState, useEffect } from 'react';
+import { Platform } from 'react-native';
 import { Recorder } from '../services/AudioRecorder';
+
+// iOS only allows one active audio input route at a time. WebRTC holds the
+// mic via getUserMedia, so opening RNAudioRecord in parallel either fails or
+// degrades the WebRTC capture. We skip the level meter on iOS and report
+// "always speaking" so the audio track stays open whenever VOX is enabled.
+const VOX_LEVEL_AVAILABLE = Platform.OS !== 'ios';
 
 const SAMPLE_RATE = 8000;        // Hz — low enough for level-only monitoring
 const CHANNELS = 1;
@@ -35,6 +42,14 @@ export function useVOX(localStream, enabled = true) {
     if (!enabled || !localStream) {
       speakingRef.current = false;
       setSpeaking(false);
+      return;
+    }
+
+    // iOS: can't read mic level without conflicting with WebRTC. Treat the
+    // gate as permanently open so transmit is gated only by muted/voxEnabled.
+    if (!VOX_LEVEL_AVAILABLE) {
+      speakingRef.current = true;
+      setSpeaking(true);
       return;
     }
 
@@ -75,7 +90,7 @@ export function useVOX(localStream, enabled = true) {
     };
   }, [enabled, localStream]);
 
-  return { speaking, thresholdDb, setThresholdDb };
+  return { speaking, thresholdDb, setThresholdDb, levelAvailable: VOX_LEVEL_AVAILABLE };
 }
 
 // Parse raw base64 PCM-16 → RMS in dBFS
