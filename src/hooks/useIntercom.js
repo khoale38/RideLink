@@ -10,6 +10,7 @@ import {
   scanForRideLinkHotspot,
   connectToHotspot,
 } from '../services/HotspotManager';
+import { startIntercomService, stopIntercomService } from '../services/IntercomService';
 
 export function useIntercom(store) {
   const signalingRef = useRef(null);
@@ -24,6 +25,7 @@ export function useIntercom(store) {
       try { stopSignalingServer(); } catch (_) { /* ignore */ }
       hostingRef.current = false;
     }
+    stopIntercomService();
     rtcRef.current = null;
     signalingRef.current = null;
     setLocalStream(null);
@@ -52,6 +54,7 @@ export function useIntercom(store) {
       });
 
       await _connect('127.0.0.1', name, store, { isHost: true });
+      await startIntercomService(`RideLink (${name})`);
       // The host is "live" as soon as its own server is up and the loopback
       // signaling client has joined — don't make the user wait for a guest.
       store.setConnected(true);
@@ -81,6 +84,7 @@ export function useIntercom(store) {
       }
 
       await _connect(getGatewayIP(), name, store);
+      await startIntercomService(`RideLink (${name})`);
     } catch (err) {
       leaveGroup();
       throw err;

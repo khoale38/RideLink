@@ -24,6 +24,16 @@
     <!-- Keep CPU on during intercom session -->
     <uses-permission android:name="android.permission.WAKE_LOCK" />
 
+    <!-- Foreground service so the OS doesn't kill the mic / sockets when the
+         rider locks the phone. FOREGROUND_SERVICE_MICROPHONE is required from
+         Android 14 onward to declare the microphone usage type explicitly. -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
+
+    <!-- Android 13+ requires explicit consent to post notifications. The
+         intercom service relies on an ongoing notification to stay alive. -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
     <application
       android:name=".MainApplication"
       android:label="@string/app_name"
@@ -46,5 +56,10 @@
             <category android:name="android.intent.category.LAUNCHER" />
         </intent-filter>
       </activity>
+
+      <service
+        android:name=".IntercomService"
+        android:exported="false"
+        android:foregroundServiceType="microphone" />
     </application>
 </manifest>
