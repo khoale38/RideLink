@@ -45,13 +45,13 @@ export function useVOX(localStream, enabled = true) {
       return;
     }
 
-    // iOS: can't read mic level without conflicting with WebRTC. Treat the
-    // gate as permanently open so transmit is gated only by muted/voxEnabled.
-    if (!VOX_LEVEL_AVAILABLE) {
-      speakingRef.current = true;
-      setSpeaking(true);
-      return;
-    }
+    // iOS: can't read mic level without conflicting with WebRTC. The gate is
+    // permanently open at the App.tsx level (see `transmit` below), but we
+    // do NOT report `speaking: true` for the UI — the green border is for
+    // actual voice activity, which we can't detect on iOS. Riders will see
+    // it light up on the OTHER iOS rider's row when they actually talk
+    // (driven by WebRTCManager's ontrack-derived "speaking" for remotes).
+    if (!VOX_LEVEL_AVAILABLE) return;
 
     const setGate = (open) => {
       if (speakingRef.current === open) return;
@@ -90,12 +90,25 @@ export function useVOX(localStream, enabled = true) {
     };
   }, [enabled, localStream]);
 
-  return { speaking, thresholdDb, setThresholdDb, levelAvailable: VOX_LEVEL_AVAILABLE };
+  // `speaking`: should the UI show a "speaking" indicator (real voice activity).
+  // `transmit`: should the audio track be enabled — true on iOS where we can't
+  //   measure level, or follows `speaking` on Android where VOX is gating.
+  const transmit = VOX_LEVEL_AVAILABLE ? speaking : true;
+  return {
+    speaking,
+    transmit,
+    thresholdDb,
+    setThresholdDb,
+    levelAvailable: VOX_LEVEL_AVAILABLE,
+  };
 }
 
 // Parse raw base64 PCM-16 → RMS in dBFS
 function _rmsDb(base64) {
   try {
+    // atob is provided by Hermes/JSC at runtime in RN 0.72+; the default
+    // @react-native ESLint preset doesn't know that — silence the warning.
+    // eslint-disable-next-line no-undef
     const binary = atob(base64);
     const bytes = new Uint8Array(binary.length);
     for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);

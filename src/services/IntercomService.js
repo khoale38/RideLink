@@ -24,12 +24,15 @@ async function ensureNotificationPermission() {
 export async function startIntercomService(groupName) {
   if (Platform.OS !== 'android') return; // iOS uses UIBackgroundModes
   if (!IntercomService) return;          // dev / unlinked
-  await ensureNotificationPermission();
-  try {
-    await IntercomService.start(groupName ?? 'Group');
-  } catch (err) {
-    if (__DEV__) console.warn('[IntercomService] start failed:', err?.message ?? err);
+  // POST_NOTIFICATIONS denial means Android will kill the foreground service
+  // almost immediately on a locked screen — surface this as a real error so
+  // the host/join flow can show the user what's wrong instead of pretending
+  // it worked and dying mid-ride.
+  const notifOk = await ensureNotificationPermission();
+  if (!notifOk) {
+    throw new Error('Notification permission denied — required to keep the intercom alive when the screen is off.');
   }
+  await IntercomService.start(groupName ?? 'Group');
 }
 
 export async function stopIntercomService() {

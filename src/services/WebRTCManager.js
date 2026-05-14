@@ -80,12 +80,14 @@ export class WebRTCManager {
     // "polite" and yields; the impolite side ignores the incoming offer.
     const existing = this.peers.get(msg.from);
     if (existing && existing.signalingState === 'have-local-offer') {
-      const polite = this.myId && this.myId < msg.from;
+      // Tie-break: smaller id yields ("polite"). If we don't yet know our own
+      // id (race on the very first peer_list), default to polite so we accept
+      // the remote offer — better one-sided rollback than a mutual stall.
+      const polite = !this.myId || this.myId < msg.from;
       if (!polite) {
         if (__DEV__) console.warn('[WebRTC] glare: ignoring offer from', msg.from);
         return;
       }
-      // Polite side: drop our in-flight offer and accept theirs.
       this._removePeer(msg.from);
     }
 

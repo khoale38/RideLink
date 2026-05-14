@@ -24,9 +24,9 @@ function App() {
   useEffect(() => {
     const track = (localStream as any)?.getAudioTracks?.()[0];
     if (!track) return;
-    const desired = screen === 'group' && !store.muted && (!voxEnabled || vox.speaking);
+    const desired = screen === 'group' && !store.muted && (!voxEnabled || vox.transmit);
     if (track.enabled !== desired) track.enabled = desired;
-  }, [localStream, screen, store.muted, voxEnabled, vox.speaking]);
+  }, [localStream, screen, store.muted, voxEnabled, vox.transmit]);
 
   const handleHost = async (name: string, password: string) => {
     if (busy) return;

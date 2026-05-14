@@ -43,6 +43,10 @@ export function useIntercom(store) {
       store.setMyName(name);
       store.setHotspotPassword?.(password);
 
+      // Start the foreground service BEFORE opening the mic so Android grants
+      // continuous mic capture even if the user immediately locks the screen.
+      await startIntercomService(`RideLink (${name})`);
+
       hostingRef.current = true;
       startSignalingServer((event) => {
         if (event.type === 'peer_joined') {
@@ -54,7 +58,6 @@ export function useIntercom(store) {
       });
 
       await _connect('127.0.0.1', name, store, { isHost: true });
-      await startIntercomService(`RideLink (${name})`);
       // The host is "live" as soon as its own server is up and the loopback
       // signaling client has joined — don't make the user wait for a guest.
       store.setConnected(true);
@@ -83,8 +86,8 @@ export function useIntercom(store) {
         if (!connected) throw new Error(`Failed to connect to ${network.SSID}`);
       }
 
-      await _connect(getGatewayIP(), name, store);
       await startIntercomService(`RideLink (${name})`);
+      await _connect(getGatewayIP(), name, store);
     } catch (err) {
       leaveGroup();
       throw err;
