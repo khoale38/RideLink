@@ -5,11 +5,24 @@
  */
 import TcpSocket from 'react-native-tcp-socket';
 
+// Crypto-strong v4 UUID. Relies on the `react-native-get-random-values`
+// polyfill imported in index.js so `crypto.getRandomValues` is available.
 function uuidv4() {
-  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (c) => {
-    const r = (Math.random() * 16) | 0;
-    return (c === 'x' ? r : (r & 0x3) | 0x8).toString(16);
-  });
+  const bytes = new Uint8Array(16);
+  // eslint-disable-next-line no-undef
+  const cryptoApi = typeof crypto !== 'undefined' ? crypto : globalThis.crypto;
+  if (cryptoApi?.getRandomValues) {
+    cryptoApi.getRandomValues(bytes);
+  } else {
+    // Polyfill missing — should not happen in production, but fall back so a
+    // misconfigured test env doesn't crash. Logged loudly in dev.
+    if (__DEV__) console.warn('[SignalingServer] crypto.getRandomValues unavailable; using Math.random fallback');
+    for (let i = 0; i < bytes.length; i++) bytes[i] = (Math.random() * 256) | 0;
+  }
+  bytes[6] = (bytes[6] & 0x0f) | 0x40; // version 4
+  bytes[8] = (bytes[8] & 0x3f) | 0x80; // variant 10
+  const hex = Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('');
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
 }
 
 export const SIGNALING_PORT = 8765;

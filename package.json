@@ -18,6 +18,7 @@
     "react-native": "0.85.3",
     "react-native-audio-record": "^0.2.2",
     "react-native-device-info": "^15.0.2",
+    "react-native-get-random-values": "^2.0.0",
     "react-native-keep-awake": "^4.0.0",
     "react-native-safe-area-context": "^5.5.2",
     "react-native-tcp-socket": "^6.4.1",

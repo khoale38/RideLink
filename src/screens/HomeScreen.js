@@ -269,13 +269,23 @@ export function HomeScreen({ onHost, onJoin, busy = false }) {
 
       <TextInput
         style={styles.input}
-        placeholder="Hotspot password (≥8 chars)"
+        placeholder={
+          Platform.OS === 'ios'
+            ? 'Password from iOS Personal Hotspot (≥8 chars)'
+            : 'Hotspot password (≥8 chars)'
+        }
         placeholderTextColor="#666"
         value={password}
         onChangeText={setPassword}
         autoCapitalize="none"
         autoCorrect={false}
       />
+      {Platform.OS === 'ios' && (
+        <Text style={styles.iosHint}>
+          iOS host: enable Personal Hotspot in Settings first, then enter the
+          same password here so riders join the same network.
+        </Text>
+      )}
 
       <TouchableOpacity
         style={[styles.btn, styles.btnHost, busy && styles.btnDisabled]}
@@ -325,6 +335,10 @@ const styles = StyleSheet.create({
   btnJoin: { backgroundColor: '#1e3a5f', borderWidth: 1, borderColor: '#2a5a9f' },
   btnText: { color: '#fff', fontSize: 18, fontWeight: '700' },
   btnSub: { color: 'rgba(255,255,255,0.6)', fontSize: 12, marginTop: 4 },
+  iosHint: {
+    width: '100%', color: '#888', fontSize: 12, marginTop: -16,
+    marginBottom: 20, lineHeight: 16,
+  },
   micTestRow: {
     width: '100%', flexDirection: 'row', alignItems: 'center',
     marginBottom: 18, gap: 12,
