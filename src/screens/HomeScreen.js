@@ -6,7 +6,6 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import DeviceInfo from 'react-native-device-info';
 import {
   HOTSPOT_PASSWORD,
-  checkMicPermission,
   requestMicPermission,
 } from '../services/HotspotManager';
 import {
@@ -241,7 +240,8 @@ export function HomeScreen({ onHost, onJoin, busy = false }) {
       {micGranted && (
         <View style={styles.micTestRow}>
           <TouchableOpacity
-            style={[styles.micTestBtn, micTesting && styles.micTestBtnActive]}
+            style={[styles.micTestBtn, micTesting && styles.micTestBtnActive, busy && styles.btnDisabled]}
+            disabled={busy}
             onPress={handleMicTest}
           >
             <Text style={styles.micTestBtnText}>
