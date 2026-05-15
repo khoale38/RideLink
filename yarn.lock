@@ -5432,6 +5432,11 @@ react-native-get-random-values@^2.0.0:
   dependencies:
     fast-base64-decode "^1.0.0"
 
+react-native-incall-manager@^4.2.0:
+  version "4.2.1"
+  resolved "https://registry.yarnpkg.com/react-native-incall-manager/-/react-native-incall-manager-4.2.1.tgz#6a261693d8906f6e69c79356e5048e95d0e3e239"
+  integrity sha512-HTdtzQ/AswUbuNhcL0gmyZLAXo8VqBO7SIh+BwbeeM1YMXXlR+Q2MvKxhD4yanjJPeyqMfuRhryCQCJhPlsdAw==
+
 react-native-keep-awake@^4.0.0:
   version "4.0.0"
   resolved "https://registry.yarnpkg.com/react-native-keep-awake/-/react-native-keep-awake-4.0.0.tgz#d89fdc3fb60b3cffa979ef37dc5816196df998a2"

@@ -1,43 +1,22 @@
 import React, { useEffect, useRef, useState } from 'react';
 import {
   View, Text, TextInput, TouchableOpacity, StyleSheet, Platform, Linking, Alert,
+  Keyboard, TouchableWithoutFeedback, ScrollView,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import DeviceInfo from 'react-native-device-info';
-import { requestMicPermission } from '../services/HotspotManager';
+import InCallManager from 'react-native-incall-manager';
+import { requestMicPermission, isIOSHotspotActive } from '../services/HotspotManager';
 import {
   checkNotificationPermission,
   requestNotificationPermission,
 } from '../services/IntercomService';
-import { Recorder } from '../services/AudioRecorder';
 
-const MIC_TEST_DURATION_MS = 4000;
-
-// Parse raw base64 PCM-16 → RMS in dBFS (mirrors useVOX logic)
-function rmsDb(base64) {
-  try {
-    // eslint-disable-next-line no-undef
-    const binary = atob(base64);
-    const bytes = new Uint8Array(binary.length);
-    for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
-    const samples = new Int16Array(bytes.buffer);
-    if (samples.length === 0) return -Infinity;
-    let sum = 0;
-    for (let i = 0; i < samples.length; i++) {
-      const norm = samples[i] / 32768;
-      sum += norm * norm;
-    }
-    const rms = Math.sqrt(sum / samples.length);
-    return rms > 0 ? 20 * Math.log10(rms) : -Infinity;
-  } catch {
-    return -Infinity;
-  }
-}
-
-// dBFS (-60..0) → 0..1 fill ratio
-function dbToFill(db) {
-  if (!isFinite(db)) return 0;
-  return Math.max(0, Math.min(1, (db + 60) / 60));
+// audioLevel from getStats() is 0..1 (linear amplitude); map to 0..1 fill with
+// a mild curve so quiet speech still moves the bar visibly.
+function levelToFill(level) {
+  if (!level || level <= 0) return 0;
+  return Math.min(1, Math.sqrt(level) * 1.2);
 }
 
 // "Khoa's iPhone" → "Khoa". If the OS only gives back a generic model like
@@ -63,8 +42,13 @@ export function HomeScreen({ onHost, onJoin, busy = false }) {
   const [notifAsked, setNotifAsked] = useState(false);
   const [requestingNotif, setRequestingNotif] = useState(false);
   const [micTesting, setMicTesting] = useState(false);
-  const [micLevel, setMicLevel] = useState(null); // null = idle, number = dBFS
-  const micTestTimer = useRef(null);
+  const [micLevel, setMicLevel] = useState(0); // 0..1 amplitude from getStats
+  // null = unknown (Android, or first check pending); true/false = iOS Personal Hotspot state
+  const [iosHotspotOn, setIosHotspotOn] = useState(null);
+  const monitorStreamRef = useRef(null);
+  const pcLocalRef = useRef(null);
+  const pcRemoteRef = useRef(null);
+  const statsTimerRef = useRef(null);
 
   // Auto-request permissions on mount. If already granted the OS returns
   // immediately with no dialog. Only shows a card if the user previously
@@ -88,6 +72,20 @@ export function HomeScreen({ onHost, onJoin, busy = false }) {
     return () => { cancelled = true; };
   }, []);
 
+  // iOS only: poll Personal Hotspot state by probing 172.20.10.1. We re-check
+  // periodically since the user may flip it while sitting on this screen.
+  useEffect(() => {
+    if (Platform.OS !== 'ios') return undefined;
+    let cancelled = false;
+    const check = async () => {
+      const on = await isIOSHotspotActive();
+      if (!cancelled) setIosHotspotOn(on);
+    };
+    check();
+    const id = setInterval(check, 3000);
+    return () => { cancelled = true; clearInterval(id); };
+  }, []);
+
   const handleEnableNotif = async () => {
     if (requestingNotif) return;
     setRequestingNotif(true);
@@ -104,49 +102,96 @@ export function HomeScreen({ onHost, onJoin, busy = false }) {
   };
 
   const stopMicTest = () => {
-    clearTimeout(micTestTimer.current);
-    Recorder.setListener(null);
-    Recorder.stop();
+    try { InCallManager.setForceSpeakerphoneOn(false); } catch (_) { /* ignore */ }
+    try { InCallManager.stop(); } catch (_) { /* ignore */ }
+    if (statsTimerRef.current) {
+      clearInterval(statsTimerRef.current);
+      statsTimerRef.current = null;
+    }
+    try { monitorStreamRef.current?.getTracks().forEach((t) => t.stop()); } catch (_) { /* ignore */ }
+    try { pcLocalRef.current?.close(); } catch (_) { /* ignore */ }
+    try { pcRemoteRef.current?.close(); } catch (_) { /* ignore */ }
+    monitorStreamRef.current = null;
+    pcLocalRef.current = null;
+    pcRemoteRef.current = null;
     setMicTesting(false);
+    setMicLevel(0);
   };
 
+  // Discord-style live mic monitor: pipe the local mic through a loopback
+  // RTCPeerConnection so the user hears themselves through the device speaker
+  // until they toggle the test off. react-native-webrtc auto-plays remote
+  // audio tracks, so no playback wiring is needed.
   const handleMicTest = async () => {
-    if (micTesting) { stopMicTest(); setMicLevel(null); return; }
-
-    if (Platform.OS === 'ios') {
-      // iOS can't run RNAudioRecord alongside WebRTC; just confirm mic works
-      setMicTesting(true);
-      try {
-        const { mediaDevices } = await import('react-native-webrtc');
-        const stream = await mediaDevices.getUserMedia({ audio: true });
-        stream.getTracks().forEach((t) => { try { t.stop(); } catch (_) { /* ignore */ } });
-        setMicLevel(0); // signal success
-      } catch {
-        setMicLevel(-Infinity);
-      }
-      setMicTesting(false);
-      return;
-    }
+    if (micTesting) { stopMicTest(); return; }
 
     setMicTesting(true);
-    setMicLevel(-Infinity);
+    setMicLevel(0);
     try {
-      Recorder.configure({ sampleRate: 8000, channels: 1, bitsPerSample: 16, wavFile: '' });
-      Recorder.setListener((raw) => {
-        const db = rmsDb(raw);
-        setMicLevel(db);
+      // Route playback through the loudspeaker instead of the earpiece.
+      try {
+        InCallManager.start({ media: 'audio' });
+        InCallManager.setForceSpeakerphoneOn(true);
+      } catch (_) { /* ignore — monitor still works, just quieter */ }
+      const { mediaDevices, RTCPeerConnection } = require('react-native-webrtc');
+      const stream = await mediaDevices.getUserMedia({ audio: true });
+      monitorStreamRef.current = stream;
+
+      const pcLocal = new RTCPeerConnection({ iceServers: [] });
+      const pcRemote = new RTCPeerConnection({ iceServers: [] });
+      pcLocalRef.current = pcLocal;
+      pcRemoteRef.current = pcRemote;
+
+      pcLocal.addEventListener('icecandidate', (e) => {
+        if (e.candidate) { try { pcRemote.addIceCandidate(e.candidate); } catch (_) { /* ignore */ } }
       });
-      Recorder.start();
+      pcRemote.addEventListener('icecandidate', (e) => {
+        if (e.candidate) { try { pcLocal.addIceCandidate(e.candidate); } catch (_) { /* ignore */ } }
+      });
+
+      // react-native-webrtc routes remote audio to the earpiece by default,
+      // which sounds tiny. Crank the remote track gain via libwebrtc's
+      // AudioTrack.setVolume (accepts 0..10) so monitor playback is audible.
+      pcRemote.addEventListener('track', (e) => {
+        const track = e?.track;
+        if (track && typeof track._setVolume === 'function') {
+          try { track._setVolume(10); } catch (_) { /* ignore */ }
+        }
+      });
+
+      stream.getTracks().forEach((t) => pcLocal.addTrack(t, stream));
+
+      const offer = await pcLocal.createOffer({});
+      await pcLocal.setLocalDescription(offer);
+      await pcRemote.setRemoteDescription(offer);
+      const answer = await pcRemote.createAnswer();
+      await pcRemote.setLocalDescription(answer);
+      await pcLocal.setRemoteDescription(answer);
+
+      // Poll local media-source audioLevel for the meter — works on both
+      // iOS and Android without a second mic consumer.
+      statsTimerRef.current = setInterval(async () => {
+        const pc = pcLocalRef.current;
+        if (!pc) return;
+        try {
+          const stats = await pc.getStats();
+          let level = 0;
+          stats.forEach((r) => {
+            if (r.type === 'media-source' && typeof r.audioLevel === 'number') {
+              if (r.audioLevel > level) level = r.audioLevel;
+            }
+          });
+          setMicLevel(level);
+        } catch (_) { /* ignore transient stats errors */ }
+      }, 120);
     } catch (err) {
-      if (__DEV__) console.warn('[MicTest] failed to start:', err);
-      setMicTesting(false);
-      return;
+      if (__DEV__) console.warn('[MicTest] monitor failed:', err);
+      stopMicTest();
     }
-    micTestTimer.current = setTimeout(() => { stopMicTest(); }, MIC_TEST_DURATION_MS);
   };
 
-  // Clean up mic test if screen unmounts
-  useEffect(() => () => { clearTimeout(micTestTimer.current); Recorder.setListener(null); Recorder.stop(); }, []);
+  // Clean up mic monitor if screen unmounts
+  useEffect(() => () => { stopMicTest(); }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   const handleEnableMic = async () => {
     if (requestingMic) return;
@@ -193,7 +238,13 @@ export function HomeScreen({ onHost, onJoin, busy = false }) {
   }, []);
 
   return (
-    <SafeAreaView style={styles.container} edges={['top', 'bottom', 'left', 'right']}>
+    <SafeAreaView style={styles.safeArea} edges={['top', 'bottom', 'left', 'right']}>
+    <TouchableWithoutFeedback onPress={Keyboard.dismiss} accessible={false}>
+    <ScrollView
+      contentContainerStyle={styles.container}
+      keyboardShouldPersistTaps="handled"
+      showsVerticalScrollIndicator={false}
+    >
       <Text style={styles.logo}>RideLink</Text>
       <Text style={styles.sub}>Offline motorcycle intercom</Text>
 
@@ -242,18 +293,15 @@ export function HomeScreen({ onHost, onJoin, busy = false }) {
             onPress={handleMicTest}
           >
             <Text style={styles.micTestBtnText}>
-              {micTesting ? 'Stop test' : 'Test mic'}
+              {micTesting ? 'Stop mic test' : 'Test mic'}
             </Text>
           </TouchableOpacity>
-          {micTesting && (
+          {micTesting ? (
             <View style={styles.levelBarBg}>
-              <View style={[styles.levelBarFill, { width: `${dbToFill(micLevel) * 100}%` }]} />
+              <View style={[styles.levelBarFill, { width: `${levelToFill(micLevel) * 100}%` }]} />
             </View>
-          )}
-          {!micTesting && micLevel !== null && (
-            <Text style={styles.micLevelText}>
-              {isFinite(micLevel) ? `${micLevel.toFixed(0)} dBFS — mic OK` : 'No signal detected'}
-            </Text>
+          ) : (
+            <Text style={styles.micLevelText}>Hear yourself live</Text>
           )}
         </View>
       )}
@@ -267,48 +315,62 @@ export function HomeScreen({ onHost, onJoin, busy = false }) {
         autoCapitalize="words"
       />
 
-      <TextInput
-        style={styles.input}
-        placeholder={
-          Platform.OS === 'ios'
-            ? 'Password from iOS Personal Hotspot (≥8 chars)'
-            : 'Hotspot password (≥8 chars)'
-        }
-        placeholderTextColor="#666"
-        value={password}
-        onChangeText={setPassword}
-        autoCapitalize="none"
-        autoCorrect={false}
-      />
-      {Platform.OS === 'ios' && (
+      {Platform.OS === 'android' && (
+        <TextInput
+          style={styles.input}
+          placeholder="Host's hotspot password (Join only)"
+          placeholderTextColor="#666"
+          value={password}
+          onChangeText={setPassword}
+          autoCapitalize="none"
+          autoCorrect={false}
+        />
+      )}
+      {Platform.OS === 'ios' && iosHotspotOn === false && (
         <Text style={styles.iosHint}>
-          iOS host: enable Personal Hotspot in Settings first, then enter the
-          same password here so riders join the same network.
+          iOS host: enable Personal Hotspot in Settings first, then tap Create.
+          Guests connect to your hotspot from their own WiFi settings.
+        </Text>
+      )}
+      {Platform.OS === 'ios' && iosHotspotOn === true && (
+        <Text style={styles.iosHintOk}>
+          Personal Hotspot is on — guests can connect now.
         </Text>
       )}
 
       <TouchableOpacity
         style={[styles.btn, styles.btnHost, busy && styles.btnDisabled]}
-        disabled={busy || (Platform.OS === 'ios' && password.length < 8) || !micGranted || !notifGranted}
+        disabled={busy}
         onPress={() => {
-          if (!name.trim()) return;
-          if (Platform.OS === 'ios') {
-            if (password.length < 8) return;
-            // iOS can't programmatically start Personal Hotspot. Confirm with
-            // the user that they've enabled it manually, then proceed.
+          if (!name.trim()) {
+            Alert.alert('Name required', 'Enter your rider name first.');
+            return;
+          }
+          if (!micGranted) {
+            Alert.alert('Microphone needed', 'Grant microphone access to host.');
+            return;
+          }
+          if (!notifGranted) {
+            Alert.alert(
+              'Notifications needed',
+              'Android needs notification permission to keep the intercom running with the screen off.',
+            );
+            return;
+          }
+          if (Platform.OS === 'ios' && iosHotspotOn !== true) {
+            // iOS can't programmatically start Personal Hotspot. If we
+            // couldn't detect it as on, ask the user to enable it.
             Alert.alert(
               'Enable Personal Hotspot first',
-              'Go to Settings → Personal Hotspot, turn it on, and make sure the password matches what you entered here. Then tap Continue.',
+              'Go to Settings → Personal Hotspot, turn it on. Riders connect from their own WiFi settings. Then tap Continue.',
               [
                 { text: 'Open Settings', onPress: () => Linking.openURL('App-Prefs:INTERNET_TETHERING').catch(() => Linking.openSettings()) },
-                { text: 'Continue', onPress: () => onHost(name.trim(), password) },
+                { text: 'Continue', onPress: () => onHost(name.trim()) },
                 { text: 'Cancel', style: 'cancel' },
               ],
             );
           } else {
-            // Android: LocalOnlyHotspot generates its own password — `password`
-            // here is only used if auto-hotspot fails. We accept any value.
-            onHost(name.trim(), password);
+            onHost(name.trim());
           }
         }}
       >
@@ -324,19 +386,50 @@ export function HomeScreen({ onHost, onJoin, busy = false }) {
 
       <TouchableOpacity
         style={[styles.btn, styles.btnJoin, busy && styles.btnDisabled]}
-        disabled={busy || password.length < 8 || !micGranted || !notifGranted}
-        onPress={() => name.trim() && password.length >= 8 && onJoin(name.trim(), password)}
+        disabled={busy}
+        onPress={() => {
+          if (!name.trim()) {
+            Alert.alert('Name required', 'Enter your rider name first.');
+            return;
+          }
+          if (!micGranted) {
+            Alert.alert('Microphone needed', 'Grant microphone access to join.');
+            return;
+          }
+          if (!notifGranted) {
+            Alert.alert(
+              'Notifications needed',
+              'Android needs notification permission to keep the intercom running with the screen off.',
+            );
+            return;
+          }
+          if (Platform.OS === 'android' && password.length < 8) {
+            Alert.alert(
+              'Hotspot password required',
+              "Enter the host's hotspot password (≥8 chars) so we can connect to their WiFi.",
+            );
+            return;
+          }
+          onJoin(name.trim(), password);
+        }}
       >
         <Text style={styles.btnText}>{busy ? 'Joining…' : 'Join Group'}</Text>
-        <Text style={styles.btnSub}>Scans for RideLink hotspot</Text>
+        <Text style={styles.btnSub}>
+          {Platform.OS === 'android'
+            ? 'Scans for RideLink hotspot'
+            : 'Connect to host hotspot in WiFi settings first'}
+        </Text>
       </TouchableOpacity>
+    </ScrollView>
+    </TouchableWithoutFeedback>
     </SafeAreaView>
   );
 }
 
 const styles = StyleSheet.create({
+  safeArea: { flex: 1, backgroundColor: '#0d0d0d' },
   container: {
-    flex: 1, backgroundColor: '#0d0d0d',
+    flexGrow: 1, backgroundColor: '#0d0d0d',
     alignItems: 'center', justifyContent: 'center', padding: 24,
   },
   logo: { fontSize: 42, fontWeight: '800', color: '#f5a623', letterSpacing: 2 },
@@ -357,6 +450,10 @@ const styles = StyleSheet.create({
   btnSub: { color: 'rgba(255,255,255,0.6)', fontSize: 12, marginTop: 4 },
   iosHint: {
     width: '100%', color: '#888', fontSize: 12, marginTop: -16,
+    marginBottom: 20, lineHeight: 16,
+  },
+  iosHintOk: {
+    width: '100%', color: '#4caf50', fontSize: 12, marginTop: -16,
     marginBottom: 20, lineHeight: 16,
   },
   micTestRow: {

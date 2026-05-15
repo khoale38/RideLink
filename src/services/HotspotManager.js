@@ -5,6 +5,7 @@
  */
 import { Platform } from 'react-native';
 import WifiManager from 'react-native-wifi-reborn';
+import TcpSocket from 'react-native-tcp-socket';
 
 export const HOTSPOT_PREFIX = 'RideLink-';
 export const SIGNALING_PORT = 8765;
@@ -36,6 +37,34 @@ export async function resolveGatewayIP() {
     /* fall through to hardcoded default */
   }
   return getGatewayIP();
+}
+
+// iOS doesn't expose a Personal Hotspot API. We probe instead: when the
+// hotspot is active, iOS creates a bridge100 interface with the host IP
+// 172.20.10.1. Try to bind a throw-away TCP listener to that address — bind
+// succeeds only if the IP exists locally, which means the hotspot is on.
+// Returns true/false on iOS, and null on Android (no detection needed — we
+// turn the hotspot on programmatically anyway).
+export async function isIOSHotspotActive() {
+  if (Platform.OS !== 'ios') return null;
+  return new Promise((resolve) => {
+    let settled = false;
+    let server = null;
+    const done = (result) => {
+      if (settled) return;
+      settled = true;
+      try { server?.close(); } catch (_) { /* ignore */ }
+      resolve(result);
+    };
+    try {
+      server = TcpSocket.createServer(() => { /* unused */ });
+      server.on('error', () => done(false));
+      server.listen({ port: 0, host: '172.20.10.1' }, () => done(true));
+    } catch {
+      done(false);
+    }
+    setTimeout(() => done(false), 1500);
+  });
 }
 
 export async function requestLocationPermission() {
