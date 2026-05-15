@@ -34,6 +34,10 @@ export const SIGNALING_PORT = 8765;
 // 64KB (SDP + ICE candidates). An unterminated stream past this is treated
 // as malicious / broken and the client is dropped.
 const MAX_BUFFER_BYTES = 64 * 1024;
+// Per-line cap. A real SDP is a few KB; ICE candidates are tiny. 32KB is
+// generous. The buffer cap above only catches "no newline ever" — this
+// catches "many oversized framed lines".
+const MAX_LINE_BYTES = 32 * 1024;
 // A client that connects but never sends a valid `join` within this window is
 // dropped. Prevents slow-loris / passive socket scanning.
 const AUTH_TIMEOUT_MS = 5000;
@@ -98,6 +102,12 @@ export function startSignalingServer(password, onEvent) {
 
       for (const line of lines) {
         if (!line.trim()) continue;
+        if (line.length > MAX_LINE_BYTES) {
+          logger.warn('SignalingServer', 'oversized message dropped — closing client', { clientId, bytes: line.length });
+          try { entry.socket.destroy(); } catch (_) { /* ignore */ }
+          clients.delete(clientId);
+          return;
+        }
         let msg;
         try {
           msg = JSON.parse(line);

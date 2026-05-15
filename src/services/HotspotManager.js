@@ -19,6 +19,25 @@ export function getGatewayIP() {
   return GATEWAY[Platform.OS] ?? GATEWAY.android;
 }
 
+// Live gateway detection: hotspots in the wild don't always use the stock
+// 192.168.43.x / 172.20.10.x subnets — some OEMs change it (192.168.137.x,
+// 192.168.49.x), and tethering apps pick their own. When we're connected,
+// derive the gateway from our own IP by replacing the last octet with .1,
+// which matches every Android/iOS hotspot subnet we've seen. Falls back to
+// the hardcoded constant if the lookup fails or returns nothing usable.
+export async function resolveGatewayIP() {
+  try {
+    const ip = await WifiManager.getIP();
+    if (typeof ip === 'string') {
+      const m = ip.match(/^(\d{1,3}\.\d{1,3}\.\d{1,3})\.\d{1,3}$/);
+      if (m) return `${m[1]}.1`;
+    }
+  } catch {
+    /* fall through to hardcoded default */
+  }
+  return getGatewayIP();
+}
+
 export async function requestLocationPermission() {
   if (Platform.OS !== 'android') return true;
   const { PermissionsAndroid } = await import('react-native');

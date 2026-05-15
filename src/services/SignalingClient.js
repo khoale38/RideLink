@@ -14,6 +14,7 @@ const CONNECT_TIMEOUT_MS = 10000;
 const RECONNECT_BASE_MS = 1000;
 const RECONNECT_MAX_MS = 15000;
 const MAX_BUFFER_BYTES = 64 * 1024;
+const MAX_LINE_BYTES = 32 * 1024;
 // Give up after this many consecutive reconnect failures. With exponential
 // backoff (1,2,4,8,15s) this is roughly 30s of trying before we surface
 // "host is gone" to the UI instead of spinning forever.
@@ -90,6 +91,12 @@ export class SignalingClient {
 
         for (const line of lines) {
           if (!line.trim()) continue;
+          if (line.length > MAX_LINE_BYTES) {
+            if (__DEV__) console.warn('[Signaling] oversized message from host — dropping connection');
+            try { this.socket?.destroy(); } catch (_) { /* ignore */ }
+            this.buffer = '';
+            return;
+          }
           let msg;
           try {
             msg = JSON.parse(line);

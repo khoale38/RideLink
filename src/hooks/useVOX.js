@@ -44,6 +44,7 @@ export function useVOX(localStream, enabled = true, localLevelRef = null) {
   const [speaking, setSpeaking] = useState(false);
   const [thresholdDb, setThresholdDb] = useState(DEFAULT_THRESHOLD_DB);
   const [calibrating, setCalibrating] = useState(false);
+  const [calibrationFailed, setCalibrationFailed] = useState(false);
   const [manualOverride, setManualOverride] = useState(false);
   const [recalibrateNonce, setRecalibrateNonce] = useState(0);
 
@@ -63,6 +64,7 @@ export function useVOX(localStream, enabled = true, localLevelRef = null) {
   // the new value sticks instead of being overridden by a stale manual value.
   const recalibrate = () => {
     setManualOverride(false);
+    setCalibrationFailed(false);
     setRecalibrateNonce((n) => n + 1);
   };
 
@@ -140,6 +142,7 @@ export function useVOX(localStream, enabled = true, localLevelRef = null) {
             logger.warn('VOX', 'no audio level yet — falling back to default threshold');
             calibrationActive = false;
             setCalibrating(false);
+            setCalibrationFailed(true);
           }
           return;
         }
@@ -184,6 +187,7 @@ export function useVOX(localStream, enabled = true, localLevelRef = null) {
     thresholdDb,
     setThresholdDb: setThresholdDbManual,
     calibrating,
+    calibrationFailed,
     recalibrate,
     levelAvailable: true,
   };

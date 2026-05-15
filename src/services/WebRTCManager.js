@@ -49,9 +49,18 @@ export class WebRTCManager {
   // actually talking. Replaces the old ontrack-once-and-stay-green behavior.
   _startSpeakingPoll() {
     if (this.speakingPoll) return;
-    const POLL_MS = 300;
+    // Adaptive cadence: 300ms is responsive enough for "who's talking" UI, but
+    // with many peers each tick fans out to N getStats() calls. Slow down past
+    // 4 peers to keep CPU/battery in check on large group rides.
+    const fastMs = 300;
+    const slowMs = 600;
     const SPEAKING_THRESHOLD = 0.01; // audioLevel is 0..1 — anything noisy
-    this.speakingPoll = setInterval(async () => {
+    let currentMs = fastMs;
+    const schedule = (ms) => {
+      currentMs = ms;
+      this.speakingPoll = setTimeout(tick, ms);
+    };
+    const tick = async () => {
       if (this.destroyed) return;
       let localLevel = 0;
       // Always read our own mic level from the local-only stats pc — that way
@@ -95,12 +104,19 @@ export class WebRTCManager {
         this.onLocalVoiceActivity?.(localSpeaking);
       }
       this.onLocalAudioLevel?.(localLevel);
-    }, POLL_MS);
+      if (this.destroyed) return;
+      const nextMs = this.peers.size > 4 ? slowMs : fastMs;
+      if (nextMs !== currentMs && __DEV__) {
+        console.warn(`[WebRTC] speaking poll cadence → ${nextMs}ms (${this.peers.size} peers)`);
+      }
+      schedule(nextMs);
+    };
+    schedule(currentMs);
   }
 
   _stopSpeakingPoll() {
     if (this.speakingPoll) {
-      clearInterval(this.speakingPoll);
+      clearTimeout(this.speakingPoll);
       this.speakingPoll = null;
     }
     this.speakingState.clear();
@@ -333,11 +349,22 @@ export class WebRTCManager {
   }
 
   _reportError(stage, err, peerId, fatal = true) {
+    // Extract the bits we actually need at the log sink — RN's console serializer
+    // sometimes drops Error fields, so unpack name/message/stack explicitly. SDP
+    // errors in particular tend to throw OperationError with the useful detail
+    // only in `message`.
+    const detail = {
+      stage,
+      peerId,
+      name: err?.name ?? null,
+      message: err?.message ?? String(err),
+      stack: err?.stack ?? null,
+    };
     if (fatal) {
-      logger.error('WebRTC', err, { stage, peerId });
-      this.onError?.({ stage, peerId, error: err });
+      logger.error('WebRTC', err, detail);
+      this.onError?.({ ...detail, error: err });
     } else {
-      logger.warn('WebRTC', `${stage} non-fatal`, { peerId, message: err?.message ?? String(err) });
+      logger.warn('WebRTC', `${stage} non-fatal`, detail);
     }
   }
 
@@ -356,6 +383,12 @@ export class WebRTCManager {
     if (this.destroyed) return;
     const ids = Array.from(this.peers.keys());
     ids.forEach((id) => this._removePeer(id));
+    // Defensive: _removePeer already clears each peer's timer, but if a timer
+    // was somehow orphaned (peer removed but timer key left behind by a prior
+    // bug), flush the whole map so a stray restart can't fire post-reset.
+    this.disconnectTimers.forEach((t) => clearTimeout(t));
+    this.disconnectTimers.clear();
+    this.initiatorOf.clear();
     this.pendingOffers = [];
     this.myId = null;
   }

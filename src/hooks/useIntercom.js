@@ -5,6 +5,7 @@ import { WebRTCManager } from '../services/WebRTCManager';
 import { startSignalingServer, stopSignalingServer, SIGNALING_PORT } from '../services/SignalingServer';
 import {
   getGatewayIP,
+  resolveGatewayIP,
   requestLocationPermission,
   requestMicPermission,
   scanForRideLinkHotspot,
@@ -118,7 +119,8 @@ export function useIntercom(store, { onKicked } = {}) {
       }
 
       await startIntercomService(`RideLink (${name})`);
-      await _connect(getGatewayIP(), name, store, { password });
+      const gateway = await resolveGatewayIP();
+      await _connect(gateway, name, store, { password });
     } catch (err) {
       leaveGroup();
       throw err;
