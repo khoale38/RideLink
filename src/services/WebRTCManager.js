@@ -151,23 +151,36 @@ export class WebRTCManager {
     }
   }
 
-  // Stand up a dummy PeerConnection that owns the local stream but never
-  // talks to anyone. getStats() on it returns `media-source` reports so the
-  // speaking-poll can read local audioLevel even when no real peer exists
-  // yet (the iOS VOX path depends on this — see useVOX.js).
+  // Stand up a loopback PeerConnection pair that owns the local stream. The
+  // two PCs handshake against each other in-process so `media-source`
+  // audioLevel reports are reliably populated by getStats() — react-native-
+  // webrtc on iOS doesn't fill them when only setLocalDescription is called
+  // without a matching remote answer. This is the same trick the mic test
+  // uses and is what lets a solo host's "speaking" indicator light up.
   async _ensureLocalStatsPc() {
     if (this._localStatsPc || !this.localStream || this.destroyed) return;
     const pc = new RTCPeerConnection(RTC_CONFIG);
+    const pcRemote = new RTCPeerConnection(RTC_CONFIG);
     try {
+      pc.addEventListener?.('icecandidate', (e) => {
+        if (e.candidate) { try { pcRemote.addIceCandidate(e.candidate); } catch (_) {} }
+      });
+      pcRemote.addEventListener?.('icecandidate', (e) => {
+        if (e.candidate) { try { pc.addIceCandidate(e.candidate); } catch (_) {} }
+      });
       this.localStream.getTracks().forEach((t) => pc.addTrack(t, this.localStream));
-      // setLocalDescription is required for media-source stats to appear on
-      // some platforms; the offer never leaves the device.
       const offer = await pc.createOffer();
-      if (this.destroyed) { try { pc.close(); } catch (_) {} return; }
+      if (this.destroyed) { try { pc.close(); } catch (_) {} try { pcRemote.close(); } catch (_) {} return; }
       await pc.setLocalDescription(offer);
+      await pcRemote.setRemoteDescription(offer);
+      const answer = await pcRemote.createAnswer();
+      await pcRemote.setLocalDescription(answer);
+      await pc.setRemoteDescription(answer);
       this._localStatsPc = pc;
+      this._localStatsPcRemote = pcRemote;
     } catch (err) {
       try { pc.close(); } catch (_) { /* ignore */ }
+      try { pcRemote.close(); } catch (_) { /* ignore */ }
       this._reportError('localStatsPc', err, null, /* fatal */ false);
     }
   }
@@ -418,6 +431,10 @@ export class WebRTCManager {
     if (this._localStatsPc) {
       try { this._localStatsPc.close(); } catch (_) { /* already closed */ }
       this._localStatsPc = null;
+    }
+    if (this._localStatsPcRemote) {
+      try { this._localStatsPcRemote.close(); } catch (_) { /* already closed */ }
+      this._localStatsPcRemote = null;
     }
     this.localStream?.getTracks().forEach((t) => {
       try { t.stop(); } catch (_) { /* ignore */ }

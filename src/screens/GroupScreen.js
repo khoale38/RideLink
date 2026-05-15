@@ -127,13 +127,7 @@ export function GroupScreen({ store, vox, voxEnabled, onToggleVox, onMuteToggle,
             thumbColor="#fff"
           />
         </View>
-        {voxEnabled && !vox.levelAvailable && (
-          <Text style={styles.voxNote}>
-            VOX is waiting for audio levels — mic is open in the meantime.
-            Level-based gating starts once a rider connects.
-          </Text>
-        )}
-        {voxEnabled && vox.levelAvailable && (
+        {voxEnabled && (
           <View style={styles.sliderRow}>
             <View style={styles.sliderHeader}>
               <Text style={styles.settingLabel}>
@@ -154,7 +148,9 @@ export function GroupScreen({ store, vox, voxEnabled, onToggleVox, onMuteToggle,
             <Text style={styles.sliderHint}>
               {vox.calibrating
                 ? 'Stay quiet for 2s — sampling noise floor…'
-                : '◀ less · more ▶'}
+                : !vox.levelAvailable
+                  ? 'Waiting for audio levels — mic stays open until a rider connects.'
+                  : '◀ less · more ▶'}
             </Text>
             <Slider
               style={styles.slider}

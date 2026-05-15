@@ -190,9 +190,11 @@ export function useVOX(localStream, enabled = true, localLevelRef = null) {
   // usable while we wait for a real peer to bring stats online.
   const voxUnavailable = calibrationFailed;
   const transmit = voxUnavailable ? true : speaking;
-  const effectiveSpeaking = voxUnavailable ? true : speaking;
+  // UI indicator must reflect actual voice activity — never force it on just
+  // because we couldn't calibrate. Otherwise the "speaking" border lights up
+  // permanently even when the rider is silent.
   return {
-    speaking: effectiveSpeaking,
+    speaking,
     transmit,
     thresholdDb,
     setThresholdDb: setThresholdDbManual,
