@@ -134,10 +134,27 @@ export function GroupScreen({ store, vox, voxEnabled, onToggleVox, onMuteToggle,
         )}
         {voxEnabled && vox.levelAvailable && (
           <View style={styles.sliderRow}>
-            <Text style={styles.settingLabel}>
-              Sensitivity: <Text style={styles.dbValue}>{vox.thresholdDb} dB</Text>
+            <View style={styles.sliderHeader}>
+              <Text style={styles.settingLabel}>
+                Sensitivity: <Text style={styles.dbValue}>
+                  {Math.round(vox.thresholdDb)} dB
+                </Text>
+              </Text>
+              <TouchableOpacity
+                style={[styles.recalBtn, vox.calibrating && styles.recalBtnActive]}
+                onPress={vox.recalibrate}
+                disabled={vox.calibrating}
+              >
+                <Text style={styles.recalBtnText}>
+                  {vox.calibrating ? 'Listening…' : 'Auto-calibrate'}
+                </Text>
+              </TouchableOpacity>
+            </View>
+            <Text style={styles.sliderHint}>
+              {vox.calibrating
+                ? 'Stay quiet for 2s — sampling noise floor…'
+                : '◀ less · more ▶'}
             </Text>
-            <Text style={styles.sliderHint}>◀ less · more ▶</Text>
             <Slider
               style={styles.slider}
               minimumValue={-60}
@@ -148,6 +165,7 @@ export function GroupScreen({ store, vox, voxEnabled, onToggleVox, onMuteToggle,
               minimumTrackTintColor="#f5a623"
               maximumTrackTintColor="#333"
               thumbTintColor="#f5a623"
+              disabled={vox.calibrating}
             />
           </View>
         )}
@@ -237,6 +255,16 @@ const styles = StyleSheet.create({
   },
   voxRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
   sliderRow: { marginTop: 10 },
+  sliderHeader: {
+    flexDirection: 'row', alignItems: 'center',
+    justifyContent: 'space-between', marginBottom: 4,
+  },
+  recalBtn: {
+    borderRadius: 8, paddingVertical: 6, paddingHorizontal: 10,
+    backgroundColor: '#1a1a1a', borderWidth: 1, borderColor: '#555',
+  },
+  recalBtnActive: { borderColor: '#f5a623' },
+  recalBtnText: { color: '#ccc', fontSize: 12, fontWeight: '600' },
   voxNote: { color: '#888', fontSize: 11, marginTop: 6, fontStyle: 'italic' },
   settingLabel: { color: '#aaa', fontSize: 13 },
   dbValue: { color: '#f5a623', fontWeight: '700' },

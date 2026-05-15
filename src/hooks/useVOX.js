@@ -25,18 +25,43 @@ const BITS_PER_SAMPLE = 16;
 const HOLD_MS = 800;             // keep open this long after last loud frame
 const DEFAULT_THRESHOLD_DB = -40;
 
+// Auto-calibration: sample the noise floor while the rider stays quiet, then
+// set the threshold above it so wind/engine doesn't trip the gate. The rider
+// should be silent for this window — surfaced via `calibrating` to the UI.
+const CALIBRATION_MS = 2500;
+const CALIBRATION_MARGIN_DB = 8;     // threshold = noiseFloorDb + margin
+const CALIBRATION_FLOOR_PCT = 0.9;   // 90th percentile of frames → noise floor
+const CALIBRATION_MIN_DB = -55;      // clamp so silent rooms don't gate at -inf
+const CALIBRATION_MAX_DB = -20;      // clamp so a noisy probe doesn't lock VOX shut
+
 // NOTE: useVOX only observes mic amplitude and reports `speaking`.
 // It does NOT mutate track.enabled — that's owned by App.tsx, which knows
 // about muted/voxEnabled/speaking together and is the single source of truth.
 export function useVOX(localStream, enabled = true) {
   const [speaking, setSpeaking] = useState(false);
   const [thresholdDb, setThresholdDb] = useState(DEFAULT_THRESHOLD_DB);
+  const [calibrating, setCalibrating] = useState(false);
+  const [manualOverride, setManualOverride] = useState(false);
+  const [recalibrateNonce, setRecalibrateNonce] = useState(0);
 
   const thresholdRef = useRef(thresholdDb);
   const holdTimer = useRef(null);
   const speakingRef = useRef(false);
 
   useEffect(() => { thresholdRef.current = thresholdDb; }, [thresholdDb]);
+
+  // Wrap setThresholdDb so any manual move flips us out of auto-mode.
+  const setThresholdDbManual = (db) => {
+    setManualOverride(true);
+    setThresholdDb(db);
+  };
+
+  // Trigger a fresh calibration pass on demand. Also re-enables auto-mode so
+  // the new value sticks instead of being overridden by a stale manual value.
+  const recalibrate = () => {
+    setManualOverride(false);
+    setRecalibrateNonce((n) => n + 1);
+  };
 
   useEffect(() => {
     if (!enabled || !localStream) {
@@ -59,8 +84,39 @@ export function useVOX(localStream, enabled = true) {
       setSpeaking(open);
     };
 
+    // Calibration window state — sample the noise floor before gating starts.
+    // Skipped when the user has manually moved the slider this session.
+    let calibrationActive = !manualOverride;
+    const calibrationSamples = [];
+    let calibrationDoneAt = calibrationActive ? Date.now() + CALIBRATION_MS : 0;
+    if (calibrationActive) setCalibrating(true);
+
+    const finishCalibration = () => {
+      calibrationActive = false;
+      setCalibrating(false);
+      if (calibrationSamples.length === 0) return;
+      // 90th-percentile noise floor: ignore the loudest 10% of frames (in case
+      // the rider coughed during calibration), then take the highest of what
+      // remains as the "noise" baseline.
+      const sorted = calibrationSamples
+        .filter((v) => isFinite(v))
+        .sort((a, b) => a - b);
+      if (sorted.length === 0) return;
+      const idx = Math.min(sorted.length - 1, Math.floor(sorted.length * CALIBRATION_FLOOR_PCT));
+      const floor = sorted[idx];
+      const raw = floor + CALIBRATION_MARGIN_DB;
+      const clamped = Math.max(CALIBRATION_MIN_DB, Math.min(CALIBRATION_MAX_DB, raw));
+      if (__DEV__) console.warn(`[VOX] calibrated noise floor=${floor.toFixed(1)} dB → threshold=${clamped.toFixed(1)} dB`);
+      setThresholdDb(clamped);
+    };
+
     const onAudioData = (data) => {
       const db = _rmsDb(data);
+      if (calibrationActive) {
+        if (isFinite(db)) calibrationSamples.push(db);
+        if (Date.now() >= calibrationDoneAt) finishCalibration();
+        return; // don't gate during calibration
+      }
       if (db >= thresholdRef.current) {
         clearTimeout(holdTimer.current);
         setGate(true);
@@ -88,7 +144,7 @@ export function useVOX(localStream, enabled = true) {
       speakingRef.current = false;
       setSpeaking(false);
     };
-  }, [enabled, localStream]);
+  }, [enabled, localStream, recalibrateNonce]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // `speaking`: should the UI show a "speaking" indicator (real voice activity).
   // `transmit`: should the audio track be enabled — true on iOS where we can't
@@ -98,7 +154,9 @@ export function useVOX(localStream, enabled = true) {
     speaking,
     transmit,
     thresholdDb,
-    setThresholdDb,
+    setThresholdDb: setThresholdDbManual,
+    calibrating,
+    recalibrate,
     levelAvailable: VOX_LEVEL_AVAILABLE,
   };
 }
