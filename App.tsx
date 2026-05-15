@@ -39,11 +39,11 @@ function App() {
     if (track.enabled !== desired) track.enabled = desired;
   }, [localStream, screen, store.muted, voxEnabled, vox.transmit]);
 
-  const handleHost = async (name: string, password: string) => {
+  const handleHost = async (name: string) => {
     if (busy) return;
     setBusy(true);
     try {
-      await hostGroup(name, password);
+      await hostGroup(name);
       setScreen('group');
     } catch (err: any) {
       leaveGroup();

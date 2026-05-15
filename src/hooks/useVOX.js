@@ -180,16 +180,26 @@ export function useVOX(localStream, enabled = true, localLevelRef = null) {
   // `speaking`: should the UI show a "speaking" indicator (real voice activity).
   // `transmit`: should the audio track be enabled — follows `speaking` on
   // both platforms now that iOS has its own (getStats-based) level path.
-  const transmit = speaking;
+  //
+  // Fail-safe: on iOS solo host, _localStatsPc may never produce an audioLevel
+  // (no remote answer → no media-source stats on some react-native-webrtc
+  // builds). After 8s VOX gives up calibration with calibrationFailed=true and
+  // level stays at 0. Without this fallback the gate would stay shut forever
+  // and the rider's audio would never transmit. Treat that case as "VOX off":
+  // mic is always live, border always shown, so the intercom is at least
+  // usable while we wait for a real peer to bring stats online.
+  const voxUnavailable = calibrationFailed;
+  const transmit = voxUnavailable ? true : speaking;
+  const effectiveSpeaking = voxUnavailable ? true : speaking;
   return {
-    speaking,
+    speaking: effectiveSpeaking,
     transmit,
     thresholdDb,
     setThresholdDb: setThresholdDbManual,
     calibrating,
     calibrationFailed,
     recalibrate,
-    levelAvailable: true,
+    levelAvailable: !voxUnavailable,
   };
 }
 

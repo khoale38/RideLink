@@ -129,7 +129,8 @@ export function GroupScreen({ store, vox, voxEnabled, onToggleVox, onMuteToggle,
         </View>
         {voxEnabled && !vox.levelAvailable && (
           <Text style={styles.voxNote}>
-            Level-based VOX not supported on iOS — mic stays open while VOX is on.
+            VOX is waiting for audio levels — mic is open in the meantime.
+            Level-based gating starts once a rider connects.
           </Text>
         )}
         {voxEnabled && vox.levelAvailable && (

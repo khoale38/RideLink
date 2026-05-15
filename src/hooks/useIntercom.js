@@ -48,14 +48,13 @@ export function useIntercom(store, { onKicked } = {}) {
     store.reset?.();
   }, [store]);
 
-  const hostGroup = useCallback(async (name, password) => {
+  const hostGroup = useCallback(async (name) => {
     try {
       const micOk = await requestMicPermission();
       if (!micOk) throw new Error('Microphone permission denied');
 
       store.setRole('host');
       store.setMyName(name);
-      store.setHotspotPassword?.(password);
 
       // Start the foreground service BEFORE opening the mic so Android grants
       // continuous mic capture even if the user immediately locks the screen.
@@ -72,15 +71,8 @@ export function useIntercom(store, { onKicked } = {}) {
         }
       }
 
-      // Resolve the password the signaling server will require. For the
-      // Android auto-hotspot path we use the OS-generated password set on the
-      // store above; otherwise fall back to the user-supplied value.
-      const sharedPassword =
-        (Platform.OS === 'android' && store.hotspotPassword) || password;
-      if (!sharedPassword) throw new Error('Hotspot password is required');
-
       hostingRef.current = true;
-      startSignalingServer(sharedPassword, (event) => {
+      startSignalingServer((event) => {
         if (event.type === 'peer_joined') {
           store.addPeer({ id: event.id, name: event.name, speaking: false });
         }
@@ -89,7 +81,7 @@ export function useIntercom(store, { onKicked } = {}) {
         }
       });
 
-      await _connect('127.0.0.1', name, store, { isHost: true, password: sharedPassword });
+      await _connect('127.0.0.1', name, store, { isHost: true });
       // The host is "live" as soon as its own server is up and the loopback
       // signaling client has joined — don't make the user wait for a guest.
       store.setConnected(true);
@@ -112,6 +104,9 @@ export function useIntercom(store, { onKicked } = {}) {
       store.setMyName(name);
 
       if (Platform.OS === 'android') {
+        if (!password || password.length < 8) {
+          throw new Error('Hotspot password is required to join the host\'s WiFi');
+        }
         const network = await scanForRideLinkHotspot();
         if (!network) throw new Error('No RideLink hotspot found nearby');
         const connected = await connectToHotspot(network.SSID, password);
@@ -120,7 +115,7 @@ export function useIntercom(store, { onKicked } = {}) {
 
       await startIntercomService(`RideLink (${name})`);
       const gateway = await resolveGatewayIP();
-      await _connect(gateway, name, store, { password });
+      await _connect(gateway, name, store, {});
     } catch (err) {
       leaveGroup();
       throw err;
@@ -207,7 +202,7 @@ export function useIntercom(store, { onKicked } = {}) {
     await client.connect();
     const stream = await rtc.startLocalAudio();
     setLocalStream(stream);
-    client.send({ type: 'join', name, isHost: !!opts.isHost, password: opts.password });
+    client.send({ type: 'join', name, isHost: !!opts.isHost });
   }
 
   return { hostGroup, joinGroup, leaveGroup, toggleMute, localStream, localLevelRef };

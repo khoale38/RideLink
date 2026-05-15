@@ -1,7 +1,11 @@
 /**
- * Tests for the signaling server auth gate and buffer cap.
+ * Tests for the signaling server's join gate, host claim, and buffer cap.
  * We stub TcpSocket.createServer so we can drive synthetic client sockets
  * and assert how the server reacts to bad input.
+ *
+ * Note: in-app signaling auth was dropped — WPA2 on the hotspot gates LAN
+ * access. The server still requires a `join` first (identity gate) so peers
+ * can't send anonymous offers/ICE before being added to the roster.
  */
 
 import TcpSocket from 'react-native-tcp-socket';
@@ -37,12 +41,8 @@ afterEach(() => {
   stopSignalingServer();
 });
 
-test('startSignalingServer throws without a password', () => {
-  expect(() => startSignalingServer('', jest.fn())).toThrow(/password/);
-});
-
-test('client sending non-join before auth is dropped', () => {
-  startSignalingServer('hunter22', jest.fn());
+test('client sending non-join before identifying is dropped', () => {
+  startSignalingServer(jest.fn());
   const socket = makeSocket();
   connectionHandler(socket);
 
@@ -50,42 +50,40 @@ test('client sending non-join before auth is dropped', () => {
   expect(socket.destroy).toHaveBeenCalled();
 });
 
-test('join with wrong password is rejected and socket destroyed', () => {
-  startSignalingServer('hunter22', jest.fn());
+test('join with a name receives peer_list', () => {
+  startSignalingServer(jest.fn());
   const socket = makeSocket();
   connectionHandler(socket);
 
-  socket._emit('data', Buffer.from(JSON.stringify({ type: 'join', name: 'Eve', password: 'guess' }) + '\n'));
-  expect(socket.destroy).toHaveBeenCalled();
-  expect(socket.write).not.toHaveBeenCalled();
-});
-
-test('join with correct password authenticates and receives peer_list', () => {
-  startSignalingServer('hunter22', jest.fn());
-  const socket = makeSocket();
-  connectionHandler(socket);
-
-  socket._emit('data', Buffer.from(JSON.stringify({ type: 'join', name: 'Alice', password: 'hunter22' }) + '\n'));
+  socket._emit('data', Buffer.from(JSON.stringify({ type: 'join', name: 'Alice' }) + '\n'));
   expect(socket.destroy).not.toHaveBeenCalled();
   expect(socket.write).toHaveBeenCalledWith(expect.stringContaining('"type":"peer_list"'));
 });
 
+test('join without a name is ignored', () => {
+  startSignalingServer(jest.fn());
+  const socket = makeSocket();
+  connectionHandler(socket);
+
+  socket._emit('data', Buffer.from(JSON.stringify({ type: 'join', name: '' }) + '\n'));
+  // Empty name: server returns without setting joined or writing peer_list.
+  expect(socket.write).not.toHaveBeenCalledWith(expect.stringContaining('"type":"peer_list"'));
+});
+
 test('stopSignalingServer broadcasts room_closed to non-host clients before closing', () => {
-  startSignalingServer('hunter22', jest.fn());
-  // Two clients: one host loopback, one guest.
+  startSignalingServer(jest.fn());
   const hostSock = makeSocket('127.0.0.1');
   const guestSock = makeSocket();
   connectionHandler(hostSock);
   connectionHandler(guestSock);
-  hostSock._emit('data', Buffer.from(JSON.stringify({ type: 'join', name: 'Host', isHost: true, password: 'hunter22' }) + '\n'));
-  guestSock._emit('data', Buffer.from(JSON.stringify({ type: 'join', name: 'Alice', password: 'hunter22' }) + '\n'));
+  hostSock._emit('data', Buffer.from(JSON.stringify({ type: 'join', name: 'Host', isHost: true }) + '\n'));
+  guestSock._emit('data', Buffer.from(JSON.stringify({ type: 'join', name: 'Alice' }) + '\n'));
   hostSock.write.mockClear();
   guestSock.write.mockClear();
 
   stopSignalingServer();
 
   expect(guestSock.write).toHaveBeenCalledWith(expect.stringContaining('"type":"room_closed"'));
-  // Host doesn't need the broadcast — it's the one closing the room.
   expect(hostSock.write).not.toHaveBeenCalled();
   expect(guestSock.destroy).toHaveBeenCalled();
   expect(hostSock.destroy).toHaveBeenCalled();
@@ -93,13 +91,10 @@ test('stopSignalingServer broadcasts room_closed to non-host clients before clos
 
 test('non-loopback client claiming isHost is downgraded to guest', () => {
   const onEvent = jest.fn();
-  startSignalingServer('hunter22', onEvent);
-  // A LAN guest sends isHost:true. The server must ignore the flag and
-  // still emit a peer_joined event to the host UI — otherwise a malicious
-  // guest could hide its presence.
+  startSignalingServer(onEvent);
   const lanSock = makeSocket('192.168.43.99');
   connectionHandler(lanSock);
-  lanSock._emit('data', Buffer.from(JSON.stringify({ type: 'join', name: 'Mallory', isHost: true, password: 'hunter22' }) + '\n'));
+  lanSock._emit('data', Buffer.from(JSON.stringify({ type: 'join', name: 'Mallory', isHost: true }) + '\n'));
 
   expect(lanSock.destroy).not.toHaveBeenCalled();
   expect(onEvent).toHaveBeenCalledWith(expect.objectContaining({ type: 'peer_joined', name: 'Mallory' }));
@@ -107,58 +102,50 @@ test('non-loopback client claiming isHost is downgraded to guest', () => {
 
 test('loopback client claiming isHost is accepted as host (no self-notify)', () => {
   const onEvent = jest.fn();
-  startSignalingServer('hunter22', onEvent);
+  startSignalingServer(onEvent);
   const hostSock = makeSocket('127.0.0.1');
   connectionHandler(hostSock);
-  hostSock._emit('data', Buffer.from(JSON.stringify({ type: 'join', name: 'Host', isHost: true, password: 'hunter22' }) + '\n'));
+  hostSock._emit('data', Buffer.from(JSON.stringify({ type: 'join', name: 'Host', isHost: true }) + '\n'));
 
-  // Host loopback connection must not appear as a peer_joined in the host's
-  // own UI — it represents itself directly.
   expect(onEvent).not.toHaveBeenCalledWith(expect.objectContaining({ type: 'peer_joined' }));
 });
 
-test('auth timeout drops a silent socket', () => {
+test('join timeout drops a silent socket', () => {
   jest.useFakeTimers();
-  startSignalingServer('hunter22', jest.fn());
+  startSignalingServer(jest.fn());
   const socket = makeSocket();
   connectionHandler(socket);
 
-  // Advance past the 10s auth window without sending anything.
   jest.advanceTimersByTime(11000);
   expect(socket.destroy).toHaveBeenCalled();
   jest.useRealTimers();
 });
 
-test('pre-auth sockets are excluded from broadcasts', () => {
-  startSignalingServer('hunter22', jest.fn());
-  const authed = makeSocket();
+test('pre-join sockets are excluded from broadcasts', () => {
+  startSignalingServer(jest.fn());
+  const joined = makeSocket();
   const silent = makeSocket();
-  connectionHandler(authed);
+  connectionHandler(joined);
   connectionHandler(silent); // never sends join
-  authed._emit('data', Buffer.from(JSON.stringify({ type: 'join', name: 'Alice', password: 'hunter22' }) + '\n'));
-  authed.write.mockClear();
+  joined._emit('data', Buffer.from(JSON.stringify({ type: 'join', name: 'Alice' }) + '\n'));
+  joined.write.mockClear();
   silent.write.mockClear();
 
-  // Now a second authed client joins — should NOT trigger a write to `silent`.
   const second = makeSocket();
   connectionHandler(second);
-  second._emit('data', Buffer.from(JSON.stringify({ type: 'join', name: 'Bob', password: 'hunter22' }) + '\n'));
+  second._emit('data', Buffer.from(JSON.stringify({ type: 'join', name: 'Bob' }) + '\n'));
   expect(silent.write).not.toHaveBeenCalled();
-  expect(authed.write).toHaveBeenCalledWith(expect.stringContaining('"type":"peer_joined"'));
+  expect(joined.write).toHaveBeenCalledWith(expect.stringContaining('"type":"peer_joined"'));
 });
 
 test('multibyte UTF-8 split across TCP chunks decodes correctly', () => {
-  startSignalingServer('hunter22', jest.fn());
+  startSignalingServer(jest.fn());
   const socket = makeSocket();
   connectionHandler(socket);
 
-  // Name with a 3-byte UTF-8 char (•, U+2022). Split the encoded bytes
-  // mid-character across two `data` events — old string-concat code would
-  // turn the split byte into U+FFFD and JSON.parse would still succeed but
-  // with a corrupted name. New byte-buffer code must reassemble cleanly.
-  const payload = JSON.stringify({ type: 'join', name: 'Al•ice', password: 'hunter22' }) + '\n';
+  const payload = JSON.stringify({ type: 'join', name: 'Al•ice' }) + '\n';
   const buf = Buffer.from(payload, 'utf8');
-  const splitAt = buf.indexOf(0xe2) + 1; // middle of the • multibyte sequence
+  const splitAt = buf.indexOf(0xe2) + 1;
   socket._emit('data', buf.subarray(0, splitAt));
   socket._emit('data', buf.subarray(splitAt));
 
@@ -167,11 +154,10 @@ test('multibyte UTF-8 split across TCP chunks decodes correctly', () => {
 });
 
 test('oversized buffer kills the client', () => {
-  startSignalingServer('hunter22', jest.fn());
+  startSignalingServer(jest.fn());
   const socket = makeSocket();
   connectionHandler(socket);
 
-  // 65KB without a newline — past the 64KB cap.
   const huge = 'A'.repeat(65 * 1024);
   socket._emit('data', Buffer.from(huge));
   expect(socket.destroy).toHaveBeenCalled();

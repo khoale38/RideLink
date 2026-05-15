@@ -43,23 +43,11 @@ const MAX_LINE_BYTES = 32 * 1024;
 // dropped. Prevents slow-loris / passive socket scanning. Matched to the
 // client-side CONNECT_TIMEOUT_MS so legit guests on marginal links aren't
 // dropped before their first `join` lands.
-const AUTH_TIMEOUT_MS = 10000;
+const JOIN_TIMEOUT_MS = 10000;
 const EMPTY_BUF = Buffer.alloc(0);
 
 let server = null;
-let sharedPassword = null;
-const clients = new Map(); // clientId -> { socket, name, buffer, authed, isHost, authTimer, remoteAddress }
-
-// Constant-time string compare — avoids leaking password length/prefix via
-// the early-exit timing of `===`. Length mismatch still short-circuits, which
-// is fine: an attacker who can probe length still has to brute-force the rest.
-function _safeEqual(a, b) {
-  if (typeof a !== 'string' || typeof b !== 'string') return false;
-  if (a.length !== b.length) return false;
-  let diff = 0;
-  for (let i = 0; i < a.length; i++) diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
-  return diff === 0;
-}
+const clients = new Map(); // clientId -> { socket, name, buffer, joined, isHost, joinTimer, remoteAddress }
 
 function _isLoopback(addr) {
   // react-native-tcp-socket sets remoteAddress on the server-side socket.
@@ -70,25 +58,21 @@ function _isLoopback(addr) {
   return addr === '127.0.0.1' || addr === '::1' || addr === '::ffff:127.0.0.1' || addr.startsWith('127.');
 }
 
-export function startSignalingServer(password, onEvent) {
+export function startSignalingServer(onEvent) {
   if (server) return;
-  if (!password || typeof password !== 'string') {
-    throw new Error('startSignalingServer requires a non-empty password');
-  }
-  sharedPassword = password;
 
   server = TcpSocket.createServer((socket) => {
     const clientId = uuidv4();
     const remoteAddress = socket.remoteAddress ?? socket._remoteAddress ?? null;
-    const authTimer = setTimeout(() => {
+    const joinTimer = setTimeout(() => {
       const entry = clients.get(clientId);
-      if (entry && !entry.authed) {
-        logger.warn('SignalingServer', 'auth timeout — dropping idle socket', { clientId });
+      if (entry && !entry.joined) {
+        logger.warn('SignalingServer', 'join timeout — dropping idle socket', { clientId });
         try { entry.socket.destroy(); } catch (_) { /* ignore */ }
         clients.delete(clientId);
       }
-    }, AUTH_TIMEOUT_MS);
-    clients.set(clientId, { socket, name: null, buffer: EMPTY_BUF, authed: false, isHost: false, authTimer, remoteAddress });
+    }, JOIN_TIMEOUT_MS);
+    clients.set(clientId, { socket, name: null, buffer: EMPTY_BUF, joined: false, isHost: false, joinTimer, remoteAddress });
 
     socket.on('data', (raw) => {
       const entry = clients.get(clientId);
@@ -121,7 +105,12 @@ export function startSignalingServer(password, onEvent) {
         try {
           msg = JSON.parse(line);
         } catch {
-          if (__DEV__) console.warn('[SignalingServer] malformed message dropped');
+          // Log a short preview so we can tell apart "old guest sending the
+          // wrong format" from "port scanner / HTTP probe / TLS hello".
+          if (__DEV__) {
+            const preview = line.length > 64 ? line.slice(0, 64) + '…' : line;
+            console.warn('[SignalingServer] malformed message dropped from', clientId, JSON.stringify(preview));
+          }
           continue;
         }
         try {
@@ -137,11 +126,11 @@ export function startSignalingServer(password, onEvent) {
     socket.on('close', () => {
       const entry = clients.get(clientId);
       if (entry) {
-        clearTimeout(entry.authTimer);
-        // Only notify peers about clients that actually authed — pre-auth
+        clearTimeout(entry.joinTimer);
+        // Only notify peers about clients that actually joined — pre-join
         // sockets never appeared in any peer list, so a peer_left would be
         // a phantom event.
-        if (entry.authed) {
+        if (entry.joined) {
           _broadcast({ type: 'peer_left', id: clientId, name: entry.name }, clientId);
           if (!entry.isHost) {
             onEvent?.({ type: 'peer_left', id: clientId, name: entry.name });
@@ -155,7 +144,7 @@ export function startSignalingServer(password, onEvent) {
       if (__DEV__) console.warn('[SignalingServer] client socket error:', err?.message ?? err);
       const entry = clients.get(clientId);
       if (entry) {
-        clearTimeout(entry.authTimer);
+        clearTimeout(entry.joinTimer);
         try { entry.socket.destroy(); } catch (_) { /* ignore */ }
       }
       clients.delete(clientId);
@@ -178,29 +167,28 @@ export function stopSignalingServer() {
   // of showing "Connecting…" forever. Sent before destroy() so the byte
   // hits the wire before the FIN.
   clients.forEach((entry) => {
-    if (entry.isHost || !entry.authed) return;
+    if (entry.isHost || !entry.joined) return;
     try { entry.socket.write(JSON.stringify({ type: 'room_closed' }) + '\n'); } catch (_) { /* ignore */ }
   });
   clients.forEach((entry) => {
-    clearTimeout(entry.authTimer);
+    clearTimeout(entry.joinTimer);
     try { entry.socket.destroy(); } catch (_) { /* ignore */ }
   });
   clients.clear();
   try { server.close(); } catch (_) { /* ignore */ }
   server = null;
-  sharedPassword = null;
 }
 
 function _handleMessage(clientId, msg, onEvent) {
   const entry = clients.get(clientId);
   if (!entry || !msg || typeof msg.type !== 'string') return;
 
-  // Auth gate: every client must successfully `join` (which carries the shared
-  // hotspot password) before the server will relay anything else. Anything
-  // before auth other than `join` is treated as hostile and the socket is
-  // dropped — this prevents a LAN attacker from injecting offers/ICE.
-  if (!entry.authed && msg.type !== 'join') {
-    logger.warn('SignalingServer', 'unauthenticated message dropped', { type: msg.type, clientId });
+  // Identity gate: every client must `join` (advertise their name) before the
+  // server will relay anything else. WPA2 already gates LAN access, so we
+  // don't take a password here — but we still require a `join` first so peers
+  // can't send anonymous offers/ICE before being added to the roster.
+  if (!entry.joined && msg.type !== 'join') {
+    logger.warn('SignalingServer', 'pre-join message dropped', { type: msg.type, clientId });
     try { entry.socket.destroy(); } catch (_) { /* ignore */ }
     clients.delete(clientId);
     return;
@@ -209,13 +197,7 @@ function _handleMessage(clientId, msg, onEvent) {
   switch (msg.type) {
     case 'join': {
       if (typeof msg.name !== 'string' || !msg.name.trim()) return;
-      if (typeof msg.password !== 'string' || !_safeEqual(msg.password, sharedPassword)) {
-        logger.warn('SignalingServer', 'auth failed', { clientId });
-        try { entry.socket.destroy(); } catch (_) { /* ignore */ }
-        clients.delete(clientId);
-        return;
-      }
-      entry.authed = true;
+      entry.joined = true;
       entry.name = msg.name;
       // Host status is derived from the socket origin — only loopback peers
       // can claim host. A guest on the LAN sending `isHost: true` is ignored
@@ -226,7 +208,7 @@ function _handleMessage(clientId, msg, onEvent) {
       if (claimedHost && !entry.isHost) {
         logger.warn('SignalingServer', 'rejected non-loopback host claim', { clientId, remoteAddress: entry.remoteAddress });
       }
-      clearTimeout(entry.authTimer);
+      clearTimeout(entry.joinTimer);
       const peers = [];
       clients.forEach((c, id) => {
         if (id !== clientId && c.name) peers.push({ id, name: c.name });
@@ -268,9 +250,9 @@ function _send(clientId, msg) {
 }
 
 function _broadcast(msg, excludeId) {
-  // Only authenticated clients receive broadcasts. A half-open socket that
-  // hasn't sent `join` yet has no business seeing peer_joined/peer_left/etc.
+  // Only joined clients receive broadcasts. A half-open socket that hasn't
+  // sent `join` yet has no business seeing peer_joined/peer_left/etc.
   clients.forEach((entry, id) => {
-    if (id !== excludeId && entry.authed) _send(id, msg);
+    if (id !== excludeId && entry.joined) _send(id, msg);
   });
 }
