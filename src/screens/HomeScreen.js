@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import {
   View, Text, TextInput, TouchableOpacity, StyleSheet, Platform, Linking,
 } from 'react-native';
@@ -13,6 +13,36 @@ import {
   checkNotificationPermission,
   requestNotificationPermission,
 } from '../services/IntercomService';
+import { Recorder } from '../services/AudioRecorder';
+
+const MIC_TEST_DURATION_MS = 4000;
+
+// Parse raw base64 PCM-16 → RMS in dBFS (mirrors useVOX logic)
+function rmsDb(base64) {
+  try {
+    // eslint-disable-next-line no-undef
+    const binary = atob(base64);
+    const bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+    const samples = new Int16Array(bytes.buffer);
+    if (samples.length === 0) return -Infinity;
+    let sum = 0;
+    for (let i = 0; i < samples.length; i++) {
+      const norm = samples[i] / 32768;
+      sum += norm * norm;
+    }
+    const rms = Math.sqrt(sum / samples.length);
+    return rms > 0 ? 20 * Math.log10(rms) : -Infinity;
+  } catch {
+    return -Infinity;
+  }
+}
+
+// dBFS (-60..0) → 0..1 fill ratio
+function dbToFill(db) {
+  if (!isFinite(db)) return 0;
+  return Math.max(0, Math.min(1, (db + 60) / 60));
+}
 
 // "Khoa's iPhone" → "Khoa". If the OS only gives back a generic model like
 // "iPhone" (iOS 16+ privacy default), we leave it for the caller to substitute.
@@ -36,15 +66,29 @@ export function HomeScreen({ onHost, onJoin, busy = false }) {
   const [notifGranted, setNotifGranted] = useState(true);
   const [notifAsked, setNotifAsked] = useState(false);
   const [requestingNotif, setRequestingNotif] = useState(false);
+  const [micTesting, setMicTesting] = useState(false);
+  const [micLevel, setMicLevel] = useState(null); // null = idle, number = dBFS
+  const micTestTimer = useRef(null);
 
-  // Refresh permission status on mount and whenever the user returns from
-  // Settings (no AppState wiring — a simple effect re-check on focus would
-  // need navigation; for this screen, the check on mount + after the user
-  // taps the button is enough).
+  // Auto-request permissions on mount. If already granted the OS returns
+  // immediately with no dialog. Only shows a card if the user previously
+  // denied and the OS won't prompt again (they need to go to Settings).
   useEffect(() => {
     let cancelled = false;
-    checkMicPermission().then((ok) => { if (!cancelled) setMicGranted(ok); });
-    checkNotificationPermission().then((ok) => { if (!cancelled) setNotifGranted(ok); });
+    (async () => {
+      const micOk = await requestMicPermission();
+      if (!cancelled) {
+        setMicGranted(micOk);
+        if (!micOk) setMicAsked(true); // already prompted, next tap → Settings
+      }
+    })();
+    (async () => {
+      const notifOk = await requestNotificationPermission();
+      if (!cancelled) {
+        setNotifGranted(notifOk);
+        if (!notifOk) setNotifAsked(true);
+      }
+    })();
     return () => { cancelled = true; };
   }, []);
 
@@ -62,6 +106,51 @@ export function HomeScreen({ onHost, onJoin, busy = false }) {
       setRequestingNotif(false);
     }
   };
+
+  const stopMicTest = () => {
+    clearTimeout(micTestTimer.current);
+    Recorder.setListener(null);
+    Recorder.stop();
+    setMicTesting(false);
+  };
+
+  const handleMicTest = async () => {
+    if (micTesting) { stopMicTest(); setMicLevel(null); return; }
+
+    if (Platform.OS === 'ios') {
+      // iOS can't run RNAudioRecord alongside WebRTC; just confirm mic works
+      setMicTesting(true);
+      try {
+        const { mediaDevices } = await import('react-native-webrtc');
+        const stream = await mediaDevices.getUserMedia({ audio: true });
+        stream.getTracks().forEach((t) => { try { t.stop(); } catch (_) { /* ignore */ } });
+        setMicLevel(0); // signal success
+      } catch {
+        setMicLevel(-Infinity);
+      }
+      setMicTesting(false);
+      return;
+    }
+
+    setMicTesting(true);
+    setMicLevel(-Infinity);
+    try {
+      Recorder.configure({ sampleRate: 8000, channels: 1, bitsPerSample: 16, wavFile: '' });
+      Recorder.setListener((raw) => {
+        const db = rmsDb(raw);
+        setMicLevel(db);
+      });
+      Recorder.start();
+    } catch (err) {
+      if (__DEV__) console.warn('[MicTest] failed to start:', err);
+      setMicTesting(false);
+      return;
+    }
+    micTestTimer.current = setTimeout(() => { stopMicTest(); }, MIC_TEST_DURATION_MS);
+  };
+
+  // Clean up mic test if screen unmounts
+  useEffect(() => () => { clearTimeout(micTestTimer.current); Recorder.setListener(null); Recorder.stop(); }, []);
 
   const handleEnableMic = async () => {
     if (requestingMic) return;
@@ -149,6 +238,29 @@ export function HomeScreen({ onHost, onJoin, busy = false }) {
         </View>
       )}
 
+      {micGranted && (
+        <View style={styles.micTestRow}>
+          <TouchableOpacity
+            style={[styles.micTestBtn, micTesting && styles.micTestBtnActive]}
+            onPress={handleMicTest}
+          >
+            <Text style={styles.micTestBtnText}>
+              {micTesting ? 'Stop test' : 'Test mic'}
+            </Text>
+          </TouchableOpacity>
+          {micTesting && (
+            <View style={styles.levelBarBg}>
+              <View style={[styles.levelBarFill, { width: `${dbToFill(micLevel) * 100}%` }]} />
+            </View>
+          )}
+          {!micTesting && micLevel !== null && (
+            <Text style={styles.micLevelText}>
+              {isFinite(micLevel) ? `${micLevel.toFixed(0)} dBFS — mic OK` : 'No signal detected'}
+            </Text>
+          )}
+        </View>
+      )}
+
       <TextInput
         style={styles.input}
         placeholder="Your rider name"
@@ -216,6 +328,24 @@ const styles = StyleSheet.create({
   btnJoin: { backgroundColor: '#1e3a5f', borderWidth: 1, borderColor: '#2a5a9f' },
   btnText: { color: '#fff', fontSize: 18, fontWeight: '700' },
   btnSub: { color: 'rgba(255,255,255,0.6)', fontSize: 12, marginTop: 4 },
+  micTestRow: {
+    width: '100%', flexDirection: 'row', alignItems: 'center',
+    marginBottom: 18, gap: 12,
+  },
+  micTestBtn: {
+    borderRadius: 8, paddingVertical: 8, paddingHorizontal: 16,
+    backgroundColor: '#1a1a1a', borderWidth: 1, borderColor: '#555',
+  },
+  micTestBtnActive: { borderColor: '#f5a623' },
+  micTestBtnText: { color: '#ccc', fontSize: 13, fontWeight: '600' },
+  levelBarBg: {
+    flex: 1, height: 10, backgroundColor: '#222',
+    borderRadius: 5, overflow: 'hidden',
+  },
+  levelBarFill: {
+    height: '100%', backgroundColor: '#f5a623', borderRadius: 5,
+  },
+  micLevelText: { color: '#888', fontSize: 12, flexShrink: 1 },
   micCard: {
     width: '100%', backgroundColor: '#2a1a00', borderRadius: 12,
     padding: 14, marginBottom: 18, borderWidth: 1, borderColor: '#f5a623',
