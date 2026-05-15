@@ -69,6 +69,27 @@ test('join with correct password authenticates and receives peer_list', () => {
   expect(socket.write).toHaveBeenCalledWith(expect.stringContaining('"type":"peer_list"'));
 });
 
+test('stopSignalingServer broadcasts room_closed to non-host clients before closing', () => {
+  startSignalingServer('hunter22', jest.fn());
+  // Two clients: one host loopback, one guest.
+  const hostSock = makeSocket();
+  const guestSock = makeSocket();
+  connectionHandler(hostSock);
+  connectionHandler(guestSock);
+  hostSock._emit('data', Buffer.from(JSON.stringify({ type: 'join', name: 'Host', isHost: true, password: 'hunter22' }) + '\n'));
+  guestSock._emit('data', Buffer.from(JSON.stringify({ type: 'join', name: 'Alice', password: 'hunter22' }) + '\n'));
+  hostSock.write.mockClear();
+  guestSock.write.mockClear();
+
+  stopSignalingServer();
+
+  expect(guestSock.write).toHaveBeenCalledWith(expect.stringContaining('"type":"room_closed"'));
+  // Host doesn't need the broadcast — it's the one closing the room.
+  expect(hostSock.write).not.toHaveBeenCalled();
+  expect(guestSock.destroy).toHaveBeenCalled();
+  expect(hostSock.destroy).toHaveBeenCalled();
+});
+
 test('oversized buffer kills the client', () => {
   startSignalingServer('hunter22', jest.fn());
   const socket = makeSocket();

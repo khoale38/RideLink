@@ -1,4 +1,4 @@
-import { useRef, useCallback, useState } from 'react';
+import { useRef, useCallback, useEffect, useState } from 'react';
 import { Platform } from 'react-native';
 import { SignalingClient } from '../services/SignalingClient';
 import { WebRTCManager } from '../services/WebRTCManager';
@@ -14,7 +14,11 @@ import { startIntercomService, stopIntercomService } from '../services/IntercomS
 import { startLocalHotspot, stopLocalHotspot } from '../services/LocalHotspot';
 import { logger } from '../services/logger';
 
-export function useIntercom(store) {
+export function useIntercom(store, { onKicked } = {}) {
+  // Latest onKicked callback kept in a ref so signaling handlers (bound once
+  // per session) always see the current value without forcing a reconnect.
+  const onKickedRef = useRef(onKicked);
+  useEffect(() => { onKickedRef.current = onKicked; });
   const signalingRef = useRef(null);
   const rtcRef = useRef(null);
   const hostingRef = useRef(false);
@@ -162,6 +166,17 @@ export function useIntercom(store) {
 
     handlers.reconnected = () => {
       storeRef.setConnected(true);
+    };
+
+    // Host sent "room_closed" — they intentionally tore down the group.
+    // Tell the UI to bail back to Home; leaveGroup tears down our side.
+    handlers.room_closed = () => {
+      onKickedRef.current?.('host_closed_room');
+    };
+
+    // Reconnect attempts exhausted — host is probably gone for good.
+    handlers.gave_up = () => {
+      onKickedRef.current?.('connection_lost');
     };
 
     const client = new SignalingClient(host, SIGNALING_PORT, handlers);

@@ -111,6 +111,13 @@ export function startSignalingServer(password, onEvent) {
 
 export function stopSignalingServer() {
   if (!server) return;
+  // Tell guests we're closing on purpose so their UI can route home instead
+  // of showing "Connecting…" forever. Sent before destroy() so the byte
+  // hits the wire before the FIN.
+  clients.forEach((entry) => {
+    if (entry.isHost) return;
+    try { entry.socket.write(JSON.stringify({ type: 'room_closed' }) + '\n'); } catch (_) { /* ignore */ }
+  });
   clients.forEach((entry) => {
     try { entry.socket.destroy(); } catch (_) { /* ignore */ }
   });

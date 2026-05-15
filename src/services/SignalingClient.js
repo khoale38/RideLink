@@ -14,6 +14,10 @@ const CONNECT_TIMEOUT_MS = 10000;
 const RECONNECT_BASE_MS = 1000;
 const RECONNECT_MAX_MS = 15000;
 const MAX_BUFFER_BYTES = 64 * 1024;
+// Give up after this many consecutive reconnect failures. With exponential
+// backoff (1,2,4,8,15s) this is roughly 30s of trying before we surface
+// "host is gone" to the UI instead of spinning forever.
+const MAX_RECONNECT_ATTEMPTS = 5;
 
 export class SignalingClient {
   constructor(host, port, handlers) {
@@ -121,6 +125,13 @@ export class SignalingClient {
     if (this.intentionallyClosed) return;
     if (!this.everConnected) return;        // initial connect failed → let caller decide
     if (this.reconnectTimer) return;        // already scheduled
+
+    if (this.reconnectAttempt >= MAX_RECONNECT_ATTEMPTS) {
+      // Stop trying — host is almost certainly gone. UI gives up gracefully.
+      this.intentionallyClosed = true;
+      this.handlers.gave_up?.();
+      return;
+    }
 
     const attempt = ++this.reconnectAttempt;
     const delay = Math.min(RECONNECT_BASE_MS * 2 ** (attempt - 1), RECONNECT_MAX_MS);

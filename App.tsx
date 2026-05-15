@@ -10,7 +10,18 @@ import { useVOX } from './src/hooks/useVOX';
 
 function App() {
   const store = useGroupStore();
-  const { hostGroup, joinGroup, leaveGroup, toggleMute, localStream, localLevelRef } = useIntercom(store);
+  const { hostGroup, joinGroup, leaveGroup, toggleMute, localStream, localLevelRef } = useIntercom(store, {
+    onKicked: (reason: 'host_closed_room' | 'connection_lost') => {
+      leaveGroup();
+      setScreen('home');
+      Alert.alert(
+        reason === 'host_closed_room' ? 'Host closed the group' : 'Lost connection',
+        reason === 'host_closed_room'
+          ? 'The host ended the ride. You\'ve been returned to the home screen.'
+          : 'Could not reach the host after several attempts. The hotspot may be out of range or the host left.',
+      );
+    },
+  });
   const [screen, setScreen] = useState<'home' | 'group'>('home');
   const [voxEnabled, setVoxEnabled] = useState(true);
   const [busy, setBusy] = useState(false);
