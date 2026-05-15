@@ -13,6 +13,7 @@ import TcpSocket from 'react-native-tcp-socket';
 const CONNECT_TIMEOUT_MS = 10000;
 const RECONNECT_BASE_MS = 1000;
 const RECONNECT_MAX_MS = 15000;
+const MAX_BUFFER_BYTES = 64 * 1024;
 
 export class SignalingClient {
   constructor(host, port, handlers) {
@@ -74,6 +75,12 @@ export class SignalingClient {
 
       this.socket.on('data', (raw) => {
         this.buffer += raw.toString();
+        if (this.buffer.length > MAX_BUFFER_BYTES) {
+          if (__DEV__) console.warn('[Signaling] receive buffer overflow, dropping connection');
+          try { this.socket?.destroy(); } catch (_) { /* ignore */ }
+          this.buffer = '';
+          return;
+        }
         const lines = this.buffer.split('\n');
         this.buffer = lines.pop();
 

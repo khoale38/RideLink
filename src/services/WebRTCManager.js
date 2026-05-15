@@ -32,6 +32,9 @@ export class WebRTCManager {
     this.speakingState = new Map(); // peerId -> bool (last reported)
     this.localSpeaking = false;
     this.speakingPoll = null;
+    // Offers that arrived before setMyId() — replayed once we know our id so
+    // the glare tie-break in _handleOffer is symmetric on both peers.
+    this.pendingOffers = [];
 
     this._bindSignalingHandlers();
     this._startSpeakingPoll();
@@ -88,6 +91,11 @@ export class WebRTCManager {
   // Required for offer-glare resolution; until it's set we behave as impolite.
   setMyId(id) {
     this.myId = id;
+    if (this.pendingOffers.length) {
+      const queued = this.pendingOffers;
+      this.pendingOffers = [];
+      queued.forEach((msg) => { this._handleOffer(msg); });
+    }
   }
 
   async startLocalAudio() {
@@ -149,15 +157,19 @@ export class WebRTCManager {
   async _handleOffer(msg) {
     if (this.destroyed) return;
 
+    // Glare tie-break needs our own id. If an offer arrives before peer_list
+    // has set it (rare race on first join), buffer until setMyId() replays.
+    if (!this.myId) {
+      this.pendingOffers.push(msg);
+      return;
+    }
+
     // Offer glare: we already have a peer connection mid-negotiation with this
     // peer. Perfect-negotiation tie-break — the lexicographically smaller id is
     // "polite" and yields; the impolite side ignores the incoming offer.
     const existing = this.peers.get(msg.from);
     if (existing && existing.signalingState === 'have-local-offer') {
-      // Tie-break: smaller id yields ("polite"). If we don't yet know our own
-      // id (race on the very first peer_list), default to polite so we accept
-      // the remote offer — better one-sided rollback than a mutual stall.
-      const polite = !this.myId || this.myId < msg.from;
+      const polite = this.myId < msg.from;
       if (!polite) {
         if (__DEV__) console.warn('[WebRTC] glare: ignoring offer from', msg.from);
         return;
@@ -304,6 +316,7 @@ export class WebRTCManager {
     this.disconnectTimers.forEach((t) => clearTimeout(t));
     this.disconnectTimers.clear();
     this.initiatorOf.clear();
+    this.pendingOffers = [];
     this._stopSpeakingPoll();
     this.peers.forEach((pc) => {
       try { pc.close(); } catch (_) { /* already closed */ }

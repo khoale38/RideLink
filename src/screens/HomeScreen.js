@@ -4,10 +4,7 @@ import {
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import DeviceInfo from 'react-native-device-info';
-import {
-  HOTSPOT_PASSWORD,
-  requestMicPermission,
-} from '../services/HotspotManager';
+import { requestMicPermission } from '../services/HotspotManager';
 import {
   checkNotificationPermission,
   requestNotificationPermission,
@@ -58,7 +55,7 @@ const GENERIC_NAMES = new Set(['iphone', 'ipad', 'ipod', 'simulator', '']);
 
 export function HomeScreen({ onHost, onJoin, busy = false }) {
   const [name, setName] = useState('');
-  const [password, setPassword] = useState(HOTSPOT_PASSWORD);
+  const [password, setPassword] = useState('');
   const [micGranted, setMicGranted] = useState(true); // optimistic — hides card until check completes
   const [micAsked, setMicAsked] = useState(false);    // becomes true after the user has tapped Allow at least once
   const [requestingMic, setRequestingMic] = useState(false);

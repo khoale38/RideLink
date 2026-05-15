@@ -1,9 +1,18 @@
 <?xml version="1.0" encoding="utf-8"?>
 <network-security-config>
-    <!-- Allow cleartext on local hotspot subnets (192.168.x.x, 172.x.x.x, 10.x.x.x) -->
+    <!--
+      Allow cleartext only on common phone-hotspot gateway IPs. The Android
+      <domain> element doesn't support CIDR, so we enumerate every gateway
+      OEMs are known to assign to LocalOnlyHotspot / tethering.
+    -->
     <domain-config cleartextTrafficPermitted="true">
-        <domain includeSubdomains="true">192.168.43.1</domain>
-        <domain includeSubdomains="true">172.20.10.1</domain>
+        <domain includeSubdomains="false">127.0.0.1</domain>
+        <domain includeSubdomains="false">192.168.43.1</domain>
+        <domain includeSubdomains="false">192.168.49.1</domain>
+        <domain includeSubdomains="false">192.168.1.1</domain>
+        <domain includeSubdomains="false">192.168.0.1</domain>
+        <domain includeSubdomains="false">172.20.10.1</domain>
+        <domain includeSubdomains="false">10.0.0.1</domain>
     </domain-config>
     <base-config cleartextTrafficPermitted="false" />
 </network-security-config>

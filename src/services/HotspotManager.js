@@ -7,7 +7,6 @@ import { Platform } from 'react-native';
 import WifiManager from 'react-native-wifi-reborn';
 
 export const HOTSPOT_PREFIX = 'RideLink-';
-export const HOTSPOT_PASSWORD = 'ridelink123';
 export const SIGNALING_PORT = 8765;
 
 // Default gateway IPs for phone-created hotspots
@@ -87,8 +86,12 @@ export async function scanForRideLinkHotspot() {
 
 const CONNECT_TIMEOUT_MS = 20000;
 
-export async function connectToHotspot(ssid, password = HOTSPOT_PASSWORD) {
+export async function connectToHotspot(ssid, password) {
   if (Platform.OS === 'ios') return false;
+  if (!password) {
+    if (__DEV__) console.warn('[HotspotManager] connectToHotspot called without a password');
+    return false;
+  }
   // WifiManager.connectToProtectedSSID can hang indefinitely if WiFi state is
   // stuck (radio off, captive portal, etc.). Race it against a timeout so the
   // UI doesn't sit on "Joining…" forever.

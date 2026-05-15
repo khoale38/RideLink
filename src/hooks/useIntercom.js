@@ -20,8 +20,10 @@ export function useIntercom(store) {
   const [localStream, setLocalStream] = useState(null);
 
   const leaveGroup = useCallback(() => {
-    try { rtcRef.current?.destroy(); } catch (_) { /* ignore */ }
+    // Disconnect signaling FIRST so any in-flight handlers (offer/answer/ice)
+    // can't call into a half-destroyed WebRTC manager.
     try { signalingRef.current?.disconnect(); } catch (_) { /* ignore */ }
+    try { rtcRef.current?.destroy(); } catch (_) { /* ignore */ }
     if (hostingRef.current) {
       try { stopSignalingServer(); } catch (_) { /* ignore */ }
       hostingRef.current = false;
@@ -60,8 +62,15 @@ export function useIntercom(store) {
         }
       }
 
+      // Resolve the password the signaling server will require. For the
+      // Android auto-hotspot path we use the OS-generated password set on the
+      // store above; otherwise fall back to the user-supplied value.
+      const sharedPassword =
+        (Platform.OS === 'android' && store.hotspotPassword) || password;
+      if (!sharedPassword) throw new Error('Hotspot password is required');
+
       hostingRef.current = true;
-      startSignalingServer((event) => {
+      startSignalingServer(sharedPassword, (event) => {
         if (event.type === 'peer_joined') {
           store.addPeer({ id: event.id, name: event.name, speaking: false });
         }
@@ -70,7 +79,7 @@ export function useIntercom(store) {
         }
       });
 
-      await _connect('127.0.0.1', name, store, { isHost: true });
+      await _connect('127.0.0.1', name, store, { isHost: true, password: sharedPassword });
       // The host is "live" as soon as its own server is up and the loopback
       // signaling client has joined — don't make the user wait for a guest.
       store.setConnected(true);
@@ -100,7 +109,7 @@ export function useIntercom(store) {
       }
 
       await startIntercomService(`RideLink (${name})`);
-      await _connect(getGatewayIP(), name, store);
+      await _connect(getGatewayIP(), name, store, { password });
     } catch (err) {
       leaveGroup();
       throw err;
@@ -167,7 +176,7 @@ export function useIntercom(store) {
     await client.connect();
     const stream = await rtc.startLocalAudio();
     setLocalStream(stream);
-    client.send({ type: 'join', name, isHost: !!opts.isHost });
+    client.send({ type: 'join', name, isHost: !!opts.isHost, password: opts.password });
   }
 
   return { hostGroup, joinGroup, leaveGroup, toggleMute, localStream };

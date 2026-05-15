@@ -76,7 +76,12 @@ function App() {
   // churns on every render).
   const leaveGroupRef = useRef(leaveGroup);
   useEffect(() => { leaveGroupRef.current = leaveGroup; }, [leaveGroup]);
-  useEffect(() => () => leaveGroupRef.current(), []);
+  useEffect(() => () => {
+    // Defer so the store's setState calls inside leaveGroup don't run during
+    // unmount of this tree (which would log a React warning).
+    const fn = leaveGroupRef.current;
+    setTimeout(() => { try { fn(); } catch (_) { /* ignore */ } }, 0);
+  }, []);
 
   return (
     <SafeAreaProvider>

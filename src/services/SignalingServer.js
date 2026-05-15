@@ -13,22 +13,37 @@ function uuidv4() {
 }
 
 export const SIGNALING_PORT = 8765;
+// Cap per-client receive buffer. Any single signaling message is well under
+// 64KB (SDP + ICE candidates). An unterminated stream past this is treated
+// as malicious / broken and the client is dropped.
+const MAX_BUFFER_BYTES = 64 * 1024;
 
 let server = null;
-const clients = new Map(); // clientId -> { socket, name, buffer }
+let sharedPassword = null;
+const clients = new Map(); // clientId -> { socket, name, buffer, authed }
 
-export function startSignalingServer(onEvent) {
+export function startSignalingServer(password, onEvent) {
   if (server) return;
+  if (!password || typeof password !== 'string') {
+    throw new Error('startSignalingServer requires a non-empty password');
+  }
+  sharedPassword = password;
 
   server = TcpSocket.createServer((socket) => {
     const clientId = uuidv4();
-    clients.set(clientId, { socket, name: null, buffer: '' });
+    clients.set(clientId, { socket, name: null, buffer: '', authed: false });
 
     socket.on('data', (raw) => {
       const entry = clients.get(clientId);
       if (!entry) return;
 
       entry.buffer += raw.toString();
+      if (entry.buffer.length > MAX_BUFFER_BYTES) {
+        if (__DEV__) console.warn('[SignalingServer] buffer overflow, dropping client', clientId);
+        try { entry.socket.destroy(); } catch (_) { /* ignore */ }
+        clients.delete(clientId);
+        return;
+      }
       const lines = entry.buffer.split('\n');
       entry.buffer = lines.pop();
 
@@ -88,15 +103,34 @@ export function stopSignalingServer() {
   clients.clear();
   try { server.close(); } catch (_) { /* ignore */ }
   server = null;
+  sharedPassword = null;
 }
 
 function _handleMessage(clientId, msg, onEvent) {
   const entry = clients.get(clientId);
   if (!entry || !msg || typeof msg.type !== 'string') return;
 
+  // Auth gate: every client must successfully `join` (which carries the shared
+  // hotspot password) before the server will relay anything else. Anything
+  // before auth other than `join` is treated as hostile and the socket is
+  // dropped — this prevents a LAN attacker from injecting offers/ICE.
+  if (!entry.authed && msg.type !== 'join') {
+    if (__DEV__) console.warn('[SignalingServer] unauthenticated', msg.type, 'from', clientId);
+    try { entry.socket.destroy(); } catch (_) { /* ignore */ }
+    clients.delete(clientId);
+    return;
+  }
+
   switch (msg.type) {
     case 'join': {
       if (typeof msg.name !== 'string' || !msg.name.trim()) return;
+      if (typeof msg.password !== 'string' || msg.password !== sharedPassword) {
+        if (__DEV__) console.warn('[SignalingServer] auth failed for', clientId);
+        try { entry.socket.destroy(); } catch (_) { /* ignore */ }
+        clients.delete(clientId);
+        return;
+      }
+      entry.authed = true;
       entry.name = msg.name;
       entry.isHost = !!msg.isHost;
       const peers = [];

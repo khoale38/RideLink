@@ -5,7 +5,7 @@ import {
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import Slider from '@react-native-community/slider';
-import { HOTSPOT_PREFIX, HOTSPOT_PASSWORD } from '../services/HotspotManager';
+import { HOTSPOT_PREFIX } from '../services/HotspotManager';
 import { WifiQrCode } from '../components/WifiQrCode';
 
 // Suggest a hotspot SSID derived from the rider's name so guests have something
@@ -41,7 +41,7 @@ export function GroupScreen({ store, vox, voxEnabled, onToggleVox, onMuteToggle,
   // via `hotspotSsid`. Elsewhere we fall back to a name-based suggestion that
   // the user must match manually in Settings.
   const activeSSID = hotspotSsid || suggestSSID(myName);
-  const activePassword = hotspotPassword || HOTSPOT_PASSWORD;
+  const activePassword = hotspotPassword || '';
 
   return (
     <SafeAreaView style={styles.container} edges={['top', 'bottom', 'left', 'right']}>
