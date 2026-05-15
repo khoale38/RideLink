@@ -123,8 +123,8 @@ test('auth timeout drops a silent socket', () => {
   const socket = makeSocket();
   connectionHandler(socket);
 
-  // Advance past the 5s auth window without sending anything.
-  jest.advanceTimersByTime(6000);
+  // Advance past the 10s auth window without sending anything.
+  jest.advanceTimersByTime(11000);
   expect(socket.destroy).toHaveBeenCalled();
   jest.useRealTimers();
 });
@@ -145,6 +145,25 @@ test('pre-auth sockets are excluded from broadcasts', () => {
   second._emit('data', Buffer.from(JSON.stringify({ type: 'join', name: 'Bob', password: 'hunter22' }) + '\n'));
   expect(silent.write).not.toHaveBeenCalled();
   expect(authed.write).toHaveBeenCalledWith(expect.stringContaining('"type":"peer_joined"'));
+});
+
+test('multibyte UTF-8 split across TCP chunks decodes correctly', () => {
+  startSignalingServer('hunter22', jest.fn());
+  const socket = makeSocket();
+  connectionHandler(socket);
+
+  // Name with a 3-byte UTF-8 char (•, U+2022). Split the encoded bytes
+  // mid-character across two `data` events — old string-concat code would
+  // turn the split byte into U+FFFD and JSON.parse would still succeed but
+  // with a corrupted name. New byte-buffer code must reassemble cleanly.
+  const payload = JSON.stringify({ type: 'join', name: 'Al•ice', password: 'hunter22' }) + '\n';
+  const buf = Buffer.from(payload, 'utf8');
+  const splitAt = buf.indexOf(0xe2) + 1; // middle of the • multibyte sequence
+  socket._emit('data', buf.subarray(0, splitAt));
+  socket._emit('data', buf.subarray(splitAt));
+
+  expect(socket.destroy).not.toHaveBeenCalled();
+  expect(socket.write).toHaveBeenCalledWith(expect.stringContaining('"yourId"'));
 });
 
 test('oversized buffer kills the client', () => {

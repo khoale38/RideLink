@@ -88,6 +88,46 @@ test('glare: lexicographically smaller id is polite and accepts remote offer', a
   rtc.destroy();
 });
 
+test('_restartIce: larger id drives restart, smaller id is silent', async () => {
+  const pc = makePc();
+  RTCPeerConnection.mockImplementation(() => pc);
+  const signaling = makeSignaling();
+  const rtc = new WebRTCManager(signaling, jest.fn(), jest.fn(), jest.fn(), jest.fn());
+
+  // Larger id → drives restart. Use callPeer to seat the peer in the map.
+  rtc.setMyId('peer-z');
+  await rtc.callPeer('peer-a');
+  signaling.send.mockClear();
+  pc.createOffer.mockClear();
+
+  await rtc._restartIce('peer-a');
+  expect(pc.createOffer).toHaveBeenCalledWith({ iceRestart: true });
+  expect(signaling.send).toHaveBeenCalledWith(
+    expect.objectContaining({ type: 'offer', to: 'peer-a' }),
+  );
+  rtc.destroy();
+});
+
+test('_restartIce: smaller id stays silent (waits for peer to drive)', async () => {
+  const pc = makePc();
+  RTCPeerConnection.mockImplementation(() => pc);
+  const signaling = makeSignaling();
+  const rtc = new WebRTCManager(signaling, jest.fn(), jest.fn(), jest.fn(), jest.fn());
+
+  // Smaller id should NOT drive restart even after a glare cleared initiatorOf.
+  // This is the regression guard: previously the polite side cleared
+  // initiatorOf on glare and then no one could restart ICE.
+  rtc.setMyId('peer-a');
+  await rtc.callPeer('peer-z');
+  signaling.send.mockClear();
+  pc.createOffer.mockClear();
+
+  await rtc._restartIce('peer-z');
+  expect(pc.createOffer).not.toHaveBeenCalled();
+  expect(signaling.send).not.toHaveBeenCalled();
+  rtc.destroy();
+});
+
 test('glare: lexicographically larger id is impolite and ignores incoming offer', async () => {
   const existing = makePc({ signalingState: 'have-local-offer' });
   RTCPeerConnection.mockImplementation(() => existing);

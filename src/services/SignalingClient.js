@@ -8,6 +8,7 @@
  * and we re-send the original `join` payload on each successful reconnect so the
  * server re-adds us to the peer list.
  */
+/* global Buffer */
 import TcpSocket from 'react-native-tcp-socket';
 
 const CONNECT_TIMEOUT_MS = 10000;
@@ -26,7 +27,7 @@ export class SignalingClient {
     this.port = port;
     this.handlers = handlers;
     this.socket = null;
-    this.buffer = '';
+    this.buffer = Buffer.alloc(0);
     this.connected = false;
     this.everConnected = false;       // gate reconnect attempts on first success
     this.intentionallyClosed = false; // set by disconnect() to stop reconnects
@@ -36,7 +37,16 @@ export class SignalingClient {
   }
 
   connect() {
+    // Reset the reconnect ladder so an instance that previously hit gave_up
+    // can be reused: clear the latch, drop any pending timer, zero the
+    // attempt counter. Without this, the next failure would immediately
+    // re-fire gave_up because the counter is still at MAX.
     this.intentionallyClosed = false;
+    this.reconnectAttempt = 0;
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+    }
     return this._openSocket();
   }
 
@@ -76,27 +86,32 @@ export class SignalingClient {
         return;
       }
 
-      this.buffer = ''; // fresh framing buffer per connection
+      this.buffer = Buffer.alloc(0); // fresh framing buffer per connection
 
       this.socket.on('data', (raw) => {
-        this.buffer += raw.toString();
+        // Buffer raw bytes so a multibyte UTF-8 char split across TCP chunks
+        // decodes correctly. Only stringify on \n boundaries.
+        const chunk = Buffer.isBuffer(raw) ? raw : Buffer.from(raw);
+        this.buffer = this.buffer.length ? Buffer.concat([this.buffer, chunk]) : chunk;
         if (this.buffer.length > MAX_BUFFER_BYTES) {
           if (__DEV__) console.warn('[Signaling] receive buffer overflow, dropping connection');
           try { this.socket?.destroy(); } catch (_) { /* ignore */ }
-          this.buffer = '';
+          this.buffer = Buffer.alloc(0);
           return;
         }
-        const lines = this.buffer.split('\n');
-        this.buffer = lines.pop();
 
-        for (const line of lines) {
-          if (!line.trim()) continue;
-          if (line.length > MAX_LINE_BYTES) {
+        let nl;
+        while ((nl = this.buffer.indexOf(0x0a)) !== -1) {
+          const lineBuf = this.buffer.subarray(0, nl);
+          this.buffer = this.buffer.subarray(nl + 1);
+          if (lineBuf.length > MAX_LINE_BYTES) {
             if (__DEV__) console.warn('[Signaling] oversized message from host — dropping connection');
             try { this.socket?.destroy(); } catch (_) { /* ignore */ }
-            this.buffer = '';
+            this.buffer = Buffer.alloc(0);
             return;
           }
+          const line = lineBuf.toString('utf8');
+          if (!line.trim()) continue;
           let msg;
           try {
             msg = JSON.parse(line);

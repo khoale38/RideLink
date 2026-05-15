@@ -193,12 +193,16 @@ export class WebRTCManager {
     }
   }
 
-  // ICE restart — only the side that originally created the offer for this
-  // peer drives the restart, to avoid both sides racing offers under glare.
+  // ICE restart — deterministically elected by id comparison so exactly one
+  // side drives the restart regardless of who originally initiated. The
+  // larger id (impolite side, matches glare tie-break) sends the new offer.
+  // This avoids relying on `initiatorOf`, which is cleared on the polite
+  // side after glare resolution and would otherwise leave a peer with no
+  // one willing to restart it.
   async _restartIce(peerId) {
     const pc = this.peers.get(peerId);
     if (!pc || this.destroyed) return;
-    if (!this.initiatorOf.has(peerId)) return;
+    if (!this.myId || this.myId < peerId) return;
     try {
       if (__DEV__) console.warn('[WebRTC] restarting ICE for', peerId);
       const offer = await pc.createOffer({ iceRestart: true });

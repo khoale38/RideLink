@@ -3,6 +3,7 @@
  * Uses newline-delimited JSON over TCP (no Node.js needed).
  * Guests connect to tcp://192.168.43.1:8765 (Android) or 172.20.10.1:8765 (iOS)
  */
+/* global Buffer */
 import TcpSocket from 'react-native-tcp-socket';
 import { logger } from './logger';
 
@@ -39,8 +40,11 @@ const MAX_BUFFER_BYTES = 64 * 1024;
 // catches "many oversized framed lines".
 const MAX_LINE_BYTES = 32 * 1024;
 // A client that connects but never sends a valid `join` within this window is
-// dropped. Prevents slow-loris / passive socket scanning.
-const AUTH_TIMEOUT_MS = 5000;
+// dropped. Prevents slow-loris / passive socket scanning. Matched to the
+// client-side CONNECT_TIMEOUT_MS so legit guests on marginal links aren't
+// dropped before their first `join` lands.
+const AUTH_TIMEOUT_MS = 10000;
+const EMPTY_BUF = Buffer.alloc(0);
 
 let server = null;
 let sharedPassword = null;
@@ -84,30 +88,35 @@ export function startSignalingServer(password, onEvent) {
         clients.delete(clientId);
       }
     }, AUTH_TIMEOUT_MS);
-    clients.set(clientId, { socket, name: null, buffer: '', authed: false, isHost: false, authTimer, remoteAddress });
+    clients.set(clientId, { socket, name: null, buffer: EMPTY_BUF, authed: false, isHost: false, authTimer, remoteAddress });
 
     socket.on('data', (raw) => {
       const entry = clients.get(clientId);
       if (!entry) return;
 
-      entry.buffer += raw.toString();
+      // Buffer raw bytes (not strings) so multibyte UTF-8 chars split across
+      // TCP chunks decode correctly. We only stringify on \n boundaries.
+      const chunk = Buffer.isBuffer(raw) ? raw : Buffer.from(raw);
+      entry.buffer = entry.buffer.length ? Buffer.concat([entry.buffer, chunk]) : chunk;
       if (entry.buffer.length > MAX_BUFFER_BYTES) {
         if (__DEV__) console.warn('[SignalingServer] buffer overflow, dropping client', clientId);
         try { entry.socket.destroy(); } catch (_) { /* ignore */ }
         clients.delete(clientId);
         return;
       }
-      const lines = entry.buffer.split('\n');
-      entry.buffer = lines.pop();
 
-      for (const line of lines) {
-        if (!line.trim()) continue;
-        if (line.length > MAX_LINE_BYTES) {
-          logger.warn('SignalingServer', 'oversized message dropped — closing client', { clientId, bytes: line.length });
+      let nl;
+      while ((nl = entry.buffer.indexOf(0x0a)) !== -1) {
+        const lineBuf = entry.buffer.subarray(0, nl);
+        entry.buffer = entry.buffer.subarray(nl + 1);
+        if (lineBuf.length > MAX_LINE_BYTES) {
+          logger.warn('SignalingServer', 'oversized message dropped — closing client', { clientId, bytes: lineBuf.length });
           try { entry.socket.destroy(); } catch (_) { /* ignore */ }
           clients.delete(clientId);
           return;
         }
+        const line = lineBuf.toString('utf8');
+        if (!line.trim()) continue;
         let msg;
         try {
           msg = JSON.parse(line);
@@ -120,6 +129,8 @@ export function startSignalingServer(password, onEvent) {
         } catch (err) {
           if (__DEV__) console.warn('[SignalingServer] handler threw:', err);
         }
+        // _handleMessage may have removed this client (e.g. failed auth).
+        if (!clients.has(clientId)) return;
       }
     });
 
