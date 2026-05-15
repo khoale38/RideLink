@@ -14,11 +14,14 @@ function uuidv4() {
   const cryptoApi = typeof crypto !== 'undefined' ? crypto : globalThis.crypto;
   if (cryptoApi?.getRandomValues) {
     cryptoApi.getRandomValues(bytes);
-  } else {
-    // Polyfill missing — should not happen in production, but fall back so a
-    // misconfigured test env doesn't crash. Logged loudly in dev.
-    if (__DEV__) console.warn('[SignalingServer] crypto.getRandomValues unavailable; using Math.random fallback');
+  } else if (__DEV__) {
+    // Test env without the polyfill — fall back so unit tests don't crash.
+    console.warn('[SignalingServer] crypto.getRandomValues unavailable; using Math.random fallback (DEV ONLY)');
     for (let i = 0; i < bytes.length; i++) bytes[i] = (Math.random() * 256) | 0;
+  } else {
+    // Production: refuse to mint guessable IDs. The polyfill is imported at
+    // the top of index.js — if it's missing, the bundle is misconfigured.
+    throw new Error('crypto.getRandomValues unavailable — react-native-get-random-values polyfill not loaded');
   }
   bytes[6] = (bytes[6] & 0x0f) | 0x40; // version 4
   bytes[8] = (bytes[8] & 0x3f) | 0x80; // variant 10
@@ -31,10 +34,33 @@ export const SIGNALING_PORT = 8765;
 // 64KB (SDP + ICE candidates). An unterminated stream past this is treated
 // as malicious / broken and the client is dropped.
 const MAX_BUFFER_BYTES = 64 * 1024;
+// A client that connects but never sends a valid `join` within this window is
+// dropped. Prevents slow-loris / passive socket scanning.
+const AUTH_TIMEOUT_MS = 5000;
 
 let server = null;
 let sharedPassword = null;
-const clients = new Map(); // clientId -> { socket, name, buffer, authed }
+const clients = new Map(); // clientId -> { socket, name, buffer, authed, isHost, authTimer, remoteAddress }
+
+// Constant-time string compare — avoids leaking password length/prefix via
+// the early-exit timing of `===`. Length mismatch still short-circuits, which
+// is fine: an attacker who can probe length still has to brute-force the rest.
+function _safeEqual(a, b) {
+  if (typeof a !== 'string' || typeof b !== 'string') return false;
+  if (a.length !== b.length) return false;
+  let diff = 0;
+  for (let i = 0; i < a.length; i++) diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
+  return diff === 0;
+}
+
+function _isLoopback(addr) {
+  // react-native-tcp-socket sets remoteAddress on the server-side socket.
+  // Loopback covers 127.0.0.0/8 and the IPv6 form. The host phone connects
+  // its own signaling client via 127.0.0.1; guests cannot reach loopback
+  // from a different device.
+  if (typeof addr !== 'string') return false;
+  return addr === '127.0.0.1' || addr === '::1' || addr === '::ffff:127.0.0.1' || addr.startsWith('127.');
+}
 
 export function startSignalingServer(password, onEvent) {
   if (server) return;
@@ -45,7 +71,16 @@ export function startSignalingServer(password, onEvent) {
 
   server = TcpSocket.createServer((socket) => {
     const clientId = uuidv4();
-    clients.set(clientId, { socket, name: null, buffer: '', authed: false });
+    const remoteAddress = socket.remoteAddress ?? socket._remoteAddress ?? null;
+    const authTimer = setTimeout(() => {
+      const entry = clients.get(clientId);
+      if (entry && !entry.authed) {
+        logger.warn('SignalingServer', 'auth timeout — dropping idle socket', { clientId });
+        try { entry.socket.destroy(); } catch (_) { /* ignore */ }
+        clients.delete(clientId);
+      }
+    }, AUTH_TIMEOUT_MS);
+    clients.set(clientId, { socket, name: null, buffer: '', authed: false, isHost: false, authTimer, remoteAddress });
 
     socket.on('data', (raw) => {
       const entry = clients.get(clientId);
@@ -81,9 +116,15 @@ export function startSignalingServer(password, onEvent) {
     socket.on('close', () => {
       const entry = clients.get(clientId);
       if (entry) {
-        _broadcast({ type: 'peer_left', id: clientId, name: entry.name }, clientId);
-        if (!entry.isHost) {
-          onEvent?.({ type: 'peer_left', id: clientId, name: entry.name });
+        clearTimeout(entry.authTimer);
+        // Only notify peers about clients that actually authed — pre-auth
+        // sockets never appeared in any peer list, so a peer_left would be
+        // a phantom event.
+        if (entry.authed) {
+          _broadcast({ type: 'peer_left', id: clientId, name: entry.name }, clientId);
+          if (!entry.isHost) {
+            onEvent?.({ type: 'peer_left', id: clientId, name: entry.name });
+          }
         }
       }
       clients.delete(clientId);
@@ -93,6 +134,7 @@ export function startSignalingServer(password, onEvent) {
       if (__DEV__) console.warn('[SignalingServer] client socket error:', err?.message ?? err);
       const entry = clients.get(clientId);
       if (entry) {
+        clearTimeout(entry.authTimer);
         try { entry.socket.destroy(); } catch (_) { /* ignore */ }
       }
       clients.delete(clientId);
@@ -115,10 +157,11 @@ export function stopSignalingServer() {
   // of showing "Connecting…" forever. Sent before destroy() so the byte
   // hits the wire before the FIN.
   clients.forEach((entry) => {
-    if (entry.isHost) return;
+    if (entry.isHost || !entry.authed) return;
     try { entry.socket.write(JSON.stringify({ type: 'room_closed' }) + '\n'); } catch (_) { /* ignore */ }
   });
   clients.forEach((entry) => {
+    clearTimeout(entry.authTimer);
     try { entry.socket.destroy(); } catch (_) { /* ignore */ }
   });
   clients.clear();
@@ -145,7 +188,7 @@ function _handleMessage(clientId, msg, onEvent) {
   switch (msg.type) {
     case 'join': {
       if (typeof msg.name !== 'string' || !msg.name.trim()) return;
-      if (typeof msg.password !== 'string' || msg.password !== sharedPassword) {
+      if (typeof msg.password !== 'string' || !_safeEqual(msg.password, sharedPassword)) {
         logger.warn('SignalingServer', 'auth failed', { clientId });
         try { entry.socket.destroy(); } catch (_) { /* ignore */ }
         clients.delete(clientId);
@@ -153,7 +196,16 @@ function _handleMessage(clientId, msg, onEvent) {
       }
       entry.authed = true;
       entry.name = msg.name;
-      entry.isHost = !!msg.isHost;
+      // Host status is derived from the socket origin — only loopback peers
+      // can claim host. A guest on the LAN sending `isHost: true` is ignored
+      // (downgraded to guest), so it can't suppress host UI notifications
+      // or impersonate the room owner.
+      const claimedHost = !!msg.isHost;
+      entry.isHost = claimedHost && _isLoopback(entry.remoteAddress);
+      if (claimedHost && !entry.isHost) {
+        logger.warn('SignalingServer', 'rejected non-loopback host claim', { clientId, remoteAddress: entry.remoteAddress });
+      }
+      clearTimeout(entry.authTimer);
       const peers = [];
       clients.forEach((c, id) => {
         if (id !== clientId && c.name) peers.push({ id, name: c.name });
@@ -195,7 +247,9 @@ function _send(clientId, msg) {
 }
 
 function _broadcast(msg, excludeId) {
-  clients.forEach((_, id) => {
-    if (id !== excludeId) _send(id, msg);
+  // Only authenticated clients receive broadcasts. A half-open socket that
+  // hasn't sent `join` yet has no business seeing peer_joined/peer_left/etc.
+  clients.forEach((entry, id) => {
+    if (id !== excludeId && entry.authed) _send(id, msg);
   });
 }

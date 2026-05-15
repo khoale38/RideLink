@@ -88,10 +88,13 @@ function App() {
   const leaveGroupRef = useRef(leaveGroup);
   useEffect(() => { leaveGroupRef.current = leaveGroup; }, [leaveGroup]);
   useEffect(() => () => {
-    // Defer so the store's setState calls inside leaveGroup don't run during
-    // unmount of this tree (which would log a React warning).
-    const fn = leaveGroupRef.current;
-    setTimeout(() => { try { fn(); } catch (_) { /* ignore */ } }, 0);
+    // Run synchronously on unmount. Previously this used setTimeout(0) to
+    // avoid React setState-during-unmount warnings, but a deferred callback
+    // can be dropped entirely if the JS context is torn down (hot reload,
+    // process kill) — leaving the signaling server and Android foreground
+    // service alive across reloads. The store's setState calls happen
+    // outside the React render path and won't warn here.
+    try { leaveGroupRef.current(); } catch (_) { /* ignore */ }
   }, []);
 
   return (

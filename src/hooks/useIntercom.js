@@ -162,6 +162,14 @@ export function useIntercom(store, { onKicked } = {}) {
 
     handlers.reconnecting = () => {
       storeRef.setConnected(false);
+      // Tear down all peer connections — the server will assign us a fresh
+      // clientId on rejoin, so existing peers already saw our socket close
+      // and tore down their side. Without this reset, callPeer would short-
+      // circuit on the stale ids in our peer map and we'd come back silent.
+      rtcRef.current?.resetPeers();
+      // Drop the peer roster from the store too — peer_list will repopulate
+      // it once the rejoin completes.
+      storeRef.peers?.forEach?.((p) => storeRef.removePeer(p.id));
     };
 
     handlers.reconnected = () => {

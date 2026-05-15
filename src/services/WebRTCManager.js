@@ -52,8 +52,21 @@ export class WebRTCManager {
     const POLL_MS = 300;
     const SPEAKING_THRESHOLD = 0.01; // audioLevel is 0..1 — anything noisy
     this.speakingPoll = setInterval(async () => {
-      if (this.destroyed || this.peers.size === 0) return;
+      if (this.destroyed) return;
       let localLevel = 0;
+      // Always read our own mic level from the local-only stats pc — that way
+      // a solo host (peers.size === 0) still sees a non-zero audioLevel and
+      // VOX calibration can complete instead of waiting 8s for the fallback.
+      if (this._localStatsPc) {
+        try {
+          const stats = await this._localStatsPc.getStats();
+          stats.forEach((report) => {
+            if (report.type === 'media-source' && typeof report.audioLevel === 'number') {
+              if (report.audioLevel > localLevel) localLevel = report.audioLevel;
+            }
+          });
+        } catch (_) { /* getStats can throw mid-teardown; ignore */ }
+      }
       for (const [peerId, pc] of this.peers) {
         try {
           const stats = await pc.getStats();
@@ -114,10 +127,32 @@ export class WebRTCManager {
         },
         video: false,
       });
+      await this._ensureLocalStatsPc();
       return this.localStream;
     } catch (err) {
       this._reportError('getUserMedia', err);
       throw err;
+    }
+  }
+
+  // Stand up a dummy PeerConnection that owns the local stream but never
+  // talks to anyone. getStats() on it returns `media-source` reports so the
+  // speaking-poll can read local audioLevel even when no real peer exists
+  // yet (the iOS VOX path depends on this — see useVOX.js).
+  async _ensureLocalStatsPc() {
+    if (this._localStatsPc || !this.localStream || this.destroyed) return;
+    const pc = new RTCPeerConnection(RTC_CONFIG);
+    try {
+      this.localStream.getTracks().forEach((t) => pc.addTrack(t, this.localStream));
+      // setLocalDescription is required for media-source stats to appear on
+      // some platforms; the offer never leaves the device.
+      const offer = await pc.createOffer();
+      if (this.destroyed) { try { pc.close(); } catch (_) {} return; }
+      await pc.setLocalDescription(offer);
+      this._localStatsPc = pc;
+    } catch (err) {
+      try { pc.close(); } catch (_) { /* ignore */ }
+      this._reportError('localStatsPc', err, null, /* fatal */ false);
     }
   }
 
@@ -312,6 +347,19 @@ export class WebRTCManager {
     this._removePeer(peerId);
   }
 
+  // Drop every peer connection on a signaling reconnect. The server will issue
+  // us a fresh clientId, so existing peers (which saw our old socket close)
+  // already tore down their side and will see us as a new peer_joined.
+  // Without this reset, callPeer() short-circuits on stale ids in this.peers
+  // and the rejoiner becomes a silent guest.
+  resetPeers() {
+    if (this.destroyed) return;
+    const ids = Array.from(this.peers.keys());
+    ids.forEach((id) => this._removePeer(id));
+    this.pendingOffers = [];
+    this.myId = null;
+  }
+
   _bindSignalingHandlers() {
     const handlers = this.signaling.handlers;
     handlers.offer = (msg) => this._handleOffer(msg);
@@ -330,6 +378,10 @@ export class WebRTCManager {
       try { pc.close(); } catch (_) { /* already closed */ }
     });
     this.peers.clear();
+    if (this._localStatsPc) {
+      try { this._localStatsPc.close(); } catch (_) { /* already closed */ }
+      this._localStatsPc = null;
+    }
     this.localStream?.getTracks().forEach((t) => {
       try { t.stop(); } catch (_) { /* ignore */ }
     });

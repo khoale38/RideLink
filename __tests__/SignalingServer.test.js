@@ -7,12 +7,13 @@
 import TcpSocket from 'react-native-tcp-socket';
 import { startSignalingServer, stopSignalingServer } from '../src/services/SignalingServer';
 
-function makeSocket() {
+function makeSocket(remoteAddress = '192.168.43.42') {
   const handlers = {};
   return {
     on: jest.fn((ev, fn) => { handlers[ev] = fn; }),
     write: jest.fn(),
     destroy: jest.fn(),
+    remoteAddress,
     _emit: (ev, ...args) => handlers[ev]?.(...args),
   };
 }
@@ -72,7 +73,7 @@ test('join with correct password authenticates and receives peer_list', () => {
 test('stopSignalingServer broadcasts room_closed to non-host clients before closing', () => {
   startSignalingServer('hunter22', jest.fn());
   // Two clients: one host loopback, one guest.
-  const hostSock = makeSocket();
+  const hostSock = makeSocket('127.0.0.1');
   const guestSock = makeSocket();
   connectionHandler(hostSock);
   connectionHandler(guestSock);
@@ -88,6 +89,62 @@ test('stopSignalingServer broadcasts room_closed to non-host clients before clos
   expect(hostSock.write).not.toHaveBeenCalled();
   expect(guestSock.destroy).toHaveBeenCalled();
   expect(hostSock.destroy).toHaveBeenCalled();
+});
+
+test('non-loopback client claiming isHost is downgraded to guest', () => {
+  const onEvent = jest.fn();
+  startSignalingServer('hunter22', onEvent);
+  // A LAN guest sends isHost:true. The server must ignore the flag and
+  // still emit a peer_joined event to the host UI — otherwise a malicious
+  // guest could hide its presence.
+  const lanSock = makeSocket('192.168.43.99');
+  connectionHandler(lanSock);
+  lanSock._emit('data', Buffer.from(JSON.stringify({ type: 'join', name: 'Mallory', isHost: true, password: 'hunter22' }) + '\n'));
+
+  expect(lanSock.destroy).not.toHaveBeenCalled();
+  expect(onEvent).toHaveBeenCalledWith(expect.objectContaining({ type: 'peer_joined', name: 'Mallory' }));
+});
+
+test('loopback client claiming isHost is accepted as host (no self-notify)', () => {
+  const onEvent = jest.fn();
+  startSignalingServer('hunter22', onEvent);
+  const hostSock = makeSocket('127.0.0.1');
+  connectionHandler(hostSock);
+  hostSock._emit('data', Buffer.from(JSON.stringify({ type: 'join', name: 'Host', isHost: true, password: 'hunter22' }) + '\n'));
+
+  // Host loopback connection must not appear as a peer_joined in the host's
+  // own UI — it represents itself directly.
+  expect(onEvent).not.toHaveBeenCalledWith(expect.objectContaining({ type: 'peer_joined' }));
+});
+
+test('auth timeout drops a silent socket', () => {
+  jest.useFakeTimers();
+  startSignalingServer('hunter22', jest.fn());
+  const socket = makeSocket();
+  connectionHandler(socket);
+
+  // Advance past the 5s auth window without sending anything.
+  jest.advanceTimersByTime(6000);
+  expect(socket.destroy).toHaveBeenCalled();
+  jest.useRealTimers();
+});
+
+test('pre-auth sockets are excluded from broadcasts', () => {
+  startSignalingServer('hunter22', jest.fn());
+  const authed = makeSocket();
+  const silent = makeSocket();
+  connectionHandler(authed);
+  connectionHandler(silent); // never sends join
+  authed._emit('data', Buffer.from(JSON.stringify({ type: 'join', name: 'Alice', password: 'hunter22' }) + '\n'));
+  authed.write.mockClear();
+  silent.write.mockClear();
+
+  // Now a second authed client joins — should NOT trigger a write to `silent`.
+  const second = makeSocket();
+  connectionHandler(second);
+  second._emit('data', Buffer.from(JSON.stringify({ type: 'join', name: 'Bob', password: 'hunter22' }) + '\n'));
+  expect(silent.write).not.toHaveBeenCalled();
+  expect(authed.write).toHaveBeenCalledWith(expect.stringContaining('"type":"peer_joined"'));
 });
 
 test('oversized buffer kills the client', () => {

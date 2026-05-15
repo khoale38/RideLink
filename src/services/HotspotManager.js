@@ -34,16 +34,18 @@ export async function requestLocationPermission() {
 }
 
 // Best-effort silent check of mic permission status. We can't fully distinguish
-// "undetermined" from "denied" on iOS without an extra dependency, so iOS only
-// reports `true` once a successful probe has occurred this session — callers
-// should treat `false` as "ask the user" rather than as a hard denial.
-let _iosMicGranted = false;
+// "undetermined" from "denied" on iOS without an extra dependency. On iOS we
+// always re-probe via getUserMedia rather than caching at module scope — a
+// user who revokes mic access in Settings would otherwise look "granted" to
+// us until app restart.
 export async function checkMicPermission() {
   if (Platform.OS === 'android') {
     const { PermissionsAndroid } = await import('react-native');
     return PermissionsAndroid.check(PermissionsAndroid.PERMISSIONS.RECORD_AUDIO);
   }
-  return _iosMicGranted;
+  // iOS: no cheap silent check available. Treat as unknown; let
+  // requestMicPermission do the live probe.
+  return false;
 }
 
 export async function requestMicPermission() {
@@ -60,14 +62,14 @@ export async function requestMicPermission() {
     return result === PermissionsAndroid.RESULTS.GRANTED;
   }
   // iOS: no programmatic permission API without an extra dep. Probe with
-  // getUserMedia — this triggers the native prompt early so the user sees
-  // it on the Home screen instead of mid-connect. Releasing immediately
-  // also avoids holding the AVAudioSession before WebRTC opens it.
+  // getUserMedia EVERY call — this catches a Settings-side revoke that
+  // would otherwise leave us thinking we still had access until restart.
+  // Release the stream immediately so we don't hold AVAudioSession before
+  // WebRTC opens it.
   try {
     const { mediaDevices } = await import('react-native-webrtc');
     const stream = await mediaDevices.getUserMedia({ audio: true });
     stream.getTracks().forEach((t) => { try { t.stop(); } catch (_) { /* ignore */ } });
-    _iosMicGranted = true;
     return true;
   } catch {
     return false;
