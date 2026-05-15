@@ -31,3 +31,24 @@ jest.mock('react-native-device-info', () => ({
 }));
 
 jest.mock('@react-native-community/slider', () => 'Slider');
+
+jest.mock('react-native-incall-manager', () => ({
+  __esModule: true,
+  default: {
+    start: jest.fn(),
+    stop: jest.fn(),
+    setForceSpeakerphoneOn: jest.fn(),
+    setKeepScreenOn: jest.fn(),
+    setMicrophoneMute: jest.fn(),
+  },
+}));
+
+jest.mock('react-native-audio-record', () => ({
+  __esModule: true,
+  default: {
+    init: jest.fn(),
+    start: jest.fn(),
+    stop: jest.fn().mockResolvedValue(''),
+    on: jest.fn(),
+  },
+}));

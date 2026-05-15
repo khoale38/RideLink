@@ -1,4 +1,31 @@
-This is a new [**React Native**](https://reactnative.dev) project, bootstrapped using [`@react-native-community/cli`](https://github.com/react-native-community/cli).
+RideLink is a React Native motorcycle/bike intercom that uses a host phone's
+Wi-Fi hotspot as the transport for WebRTC voice between riders, with
+voice-activated transmission (VOX).
+
+# Threat Model — LAN-only
+
+**RideLink is designed to run on a private Wi-Fi hotspot and is not safe to
+expose to public or shared networks.** Specifically:
+
+- The signaling channel (TCP/JSON between guests and the host) is **not
+  encrypted and not authenticated** beyond what the underlying Wi-Fi provides.
+  Confidentiality and integrity rely entirely on WPA2/WPA3 protecting the
+  hotspot LAN.
+- WebRTC media itself is DTLS/SRTP encrypted end-to-end between peers, but
+  signaling MITM on the LAN can redirect or drop streams.
+- The host enforces a loopback-only check before accepting "host" identity
+  claims, so LAN guests cannot impersonate the host. Guests trust the host.
+- There is no STUN/TURN: connectivity is LAN-direct only. RideLink will not
+  work over the public internet or across NATs by design.
+
+**Do not run RideLink on:** open guest Wi-Fi, conference/coffee-shop networks,
+or any network where you do not control who else is associated. Always use a
+WPA2/WPA3-protected hotspot with a strong password chosen by the host at
+hotspot-setup time (the app no longer ships a hardcoded password).
+
+If you ever want to deploy beyond a private hotspot, the signaling channel
+will need TLS (or some authenticated framing) and a real auth/identity layer —
+the current design intentionally trusts the LAN.
 
 # Getting Started
 

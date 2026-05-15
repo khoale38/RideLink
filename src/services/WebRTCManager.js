@@ -172,13 +172,14 @@ export class WebRTCManager {
       });
       // Critical: the loopback handshake makes pcRemote auto-play the received
       // audio through the device speaker (same path the mic test uses on
-      // purpose). Without muting it, the rider would hear themselves the whole
-      // session and the playback would feed back into the mic. Force gain to 0
-      // as soon as the remote track arrives.
+      // purpose). Without silencing it, the rider would hear themselves and
+      // the playback would feed back into the mic. Setting `enabled = false`
+      // is the spec-compliant way to suppress playback while keeping the
+      // sender's stats path alive.
       pcRemote.addEventListener?.('track', (e) => {
         const track = e?.track;
-        if (track && typeof track._setVolume === 'function') {
-          try { track._setVolume(0); } catch (_) { /* ignore */ }
+        if (track) {
+          try { track.enabled = false; } catch (_) { /* ignore */ }
         }
       });
       this.localStream.getTracks().forEach((t) => pc.addTrack(t, this.localStream));
