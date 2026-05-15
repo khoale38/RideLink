@@ -4,6 +4,7 @@
  * Guests connect to tcp://192.168.43.1:8765 (Android) or 172.20.10.1:8765 (iOS)
  */
 import TcpSocket from 'react-native-tcp-socket';
+import { logger } from './logger';
 
 // Crypto-strong v4 UUID. Relies on the `react-native-get-random-values`
 // polyfill imported in index.js so `crypto.getRandomValues` is available.
@@ -128,7 +129,7 @@ function _handleMessage(clientId, msg, onEvent) {
   // before auth other than `join` is treated as hostile and the socket is
   // dropped — this prevents a LAN attacker from injecting offers/ICE.
   if (!entry.authed && msg.type !== 'join') {
-    if (__DEV__) console.warn('[SignalingServer] unauthenticated', msg.type, 'from', clientId);
+    logger.warn('SignalingServer', 'unauthenticated message dropped', { type: msg.type, clientId });
     try { entry.socket.destroy(); } catch (_) { /* ignore */ }
     clients.delete(clientId);
     return;
@@ -138,7 +139,7 @@ function _handleMessage(clientId, msg, onEvent) {
     case 'join': {
       if (typeof msg.name !== 'string' || !msg.name.trim()) return;
       if (typeof msg.password !== 'string' || msg.password !== sharedPassword) {
-        if (__DEV__) console.warn('[SignalingServer] auth failed for', clientId);
+        logger.warn('SignalingServer', 'auth failed', { clientId });
         try { entry.socket.destroy(); } catch (_) { /* ignore */ }
         clients.delete(clientId);
         return;

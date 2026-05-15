@@ -41,12 +41,20 @@ export function useGroupStore() {
     );
   }, []);
 
+  // Canonical full-reset: clear every field that varies per session. Called
+  // once from useIntercom.leaveGroup so callers don't need to remember the
+  // list of fields to clear individually.
   const reset = useCallback(() => {
     setMyId(null);
     setPeers([]);
     setMuted(false);
     setSelfSpeaking(false);
     setHotspotSsid('');
+    setHotspotPassword('');
+    setRole(null);
+    setConnected(false);
+    // myName is intentionally preserved across sessions so the user doesn't
+    // have to re-type their rider name on the next group.
   }, []);
 
   return {

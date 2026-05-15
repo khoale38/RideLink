@@ -14,6 +14,7 @@
 import { useRef, useState, useEffect } from 'react';
 import { Platform } from 'react-native';
 import { Recorder } from '../services/AudioRecorder';
+import { logger } from '../services/logger';
 
 const IS_IOS = Platform.OS === 'ios';
 // iOS polls a level ref the WebRTCManager fills via getStats. Cadence matches
@@ -123,6 +124,7 @@ export function useVOX(localStream, enabled = true, localLevelRef = null) {
       // iOS path: poll the WebRTCManager-supplied level ref. No peer
       // connection → ref stays at 0 → calibration would lock at -inf, so we
       // wait until we see a non-zero sample before starting the timer.
+      const startedAt = Date.now();
       const tick = () => {
         const level = localLevelRef?.current ?? 0;
         // 0..1 → dBFS. level=0 → -Infinity (silent / no pc yet).
@@ -130,6 +132,15 @@ export function useVOX(localStream, enabled = true, localLevelRef = null) {
         // Defer calibration start until WebRTC stats are flowing.
         if (calibrationActive && calibrationSamples.length === 0 && !isFinite(db)) {
           calibrationDoneAt = Date.now() + CALIBRATION_MS;
+          // Fallback: if no peer has connected after 8s, give up on
+          // calibration so the rider isn't gated shut while waiting alone.
+          // The default threshold takes over and the next recalibrate call
+          // (or auto-recalibrate on next session) will replace it.
+          if (Date.now() - startedAt > 8000) {
+            logger.warn('VOX', 'no audio level yet — falling back to default threshold');
+            calibrationActive = false;
+            setCalibrating(false);
+          }
           return;
         }
         onSample(db);

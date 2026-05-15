@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
 import {
-  View, Text, TextInput, TouchableOpacity, StyleSheet, Platform, Linking,
+  View, Text, TextInput, TouchableOpacity, StyleSheet, Platform, Linking, Alert,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import DeviceInfo from 'react-native-device-info';
@@ -289,8 +289,28 @@ export function HomeScreen({ onHost, onJoin, busy = false }) {
 
       <TouchableOpacity
         style={[styles.btn, styles.btnHost, busy && styles.btnDisabled]}
-        disabled={busy || password.length < 8 || !micGranted || !notifGranted}
-        onPress={() => name.trim() && password.length >= 8 && onHost(name.trim(), password)}
+        disabled={busy || (Platform.OS === 'ios' && password.length < 8) || !micGranted || !notifGranted}
+        onPress={() => {
+          if (!name.trim()) return;
+          if (Platform.OS === 'ios') {
+            if (password.length < 8) return;
+            // iOS can't programmatically start Personal Hotspot. Confirm with
+            // the user that they've enabled it manually, then proceed.
+            Alert.alert(
+              'Enable Personal Hotspot first',
+              'Go to Settings → Personal Hotspot, turn it on, and make sure the password matches what you entered here. Then tap Continue.',
+              [
+                { text: 'Open Settings', onPress: () => Linking.openURL('App-Prefs:INTERNET_TETHERING').catch(() => Linking.openSettings()) },
+                { text: 'Continue', onPress: () => onHost(name.trim(), password) },
+                { text: 'Cancel', style: 'cancel' },
+              ],
+            );
+          } else {
+            // Android: LocalOnlyHotspot generates its own password — `password`
+            // here is only used if auto-hotspot fails. We accept any value.
+            onHost(name.trim(), password);
+          }
+        }}
       >
         <Text style={styles.btnText}>
           {busy ? 'Starting…' : 'Create Group (Host)'}

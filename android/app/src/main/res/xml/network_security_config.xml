@@ -3,7 +3,10 @@
     <!--
       Allow cleartext only on common phone-hotspot gateway IPs. The Android
       <domain> element doesn't support CIDR, so we enumerate every gateway
-      OEMs are known to assign to LocalOnlyHotspot / tethering.
+      OEMs are known to assign to LocalOnlyHotspot / tethering. If you see
+      hotspot connections that work but the intercom never reaches the
+      signaling server, check the host's gateway IP (adb shell ip route on
+      a connected guest device) and add it here.
     -->
     <domain-config cleartextTrafficPermitted="true">
         <domain includeSubdomains="false">127.0.0.1</domain>

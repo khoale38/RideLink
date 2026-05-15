@@ -9,6 +9,7 @@ import {
   RTCIceCandidate,
   mediaDevices,
 } from 'react-native-webrtc';
+import { logger } from './logger';
 
 const RTC_CONFIG = {
   iceServers: [], // No STUN/TURN — all local LAN
@@ -297,10 +298,12 @@ export class WebRTCManager {
   }
 
   _reportError(stage, err, peerId, fatal = true) {
-    if (__DEV__) {
-      console.warn(`[WebRTC] ${stage} failed${peerId ? ` for ${peerId}` : ''}:`, err?.message ?? err);
+    if (fatal) {
+      logger.error('WebRTC', err, { stage, peerId });
+      this.onError?.({ stage, peerId, error: err });
+    } else {
+      logger.warn('WebRTC', `${stage} non-fatal`, { peerId, message: err?.message ?? String(err) });
     }
-    if (fatal) this.onError?.({ stage, peerId, error: err });
   }
 
   // Public: useIntercom calls this from its own peer_left handler so we don't

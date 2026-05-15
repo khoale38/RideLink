@@ -12,6 +12,7 @@ import {
 } from '../services/HotspotManager';
 import { startIntercomService, stopIntercomService } from '../services/IntercomService';
 import { startLocalHotspot, stopLocalHotspot } from '../services/LocalHotspot';
+import { logger } from '../services/logger';
 
 export function useIntercom(store) {
   const signalingRef = useRef(null);
@@ -37,8 +38,8 @@ export function useIntercom(store) {
     rtcRef.current = null;
     signalingRef.current = null;
     setLocalStream(null);
-    store.setConnected(false);
-    store.setRole(null);
+    // Single canonical reset — clears role, connected, peers, hotspot info,
+    // self-speaking, and mute together.
     store.reset?.();
   }, [store]);
 
@@ -170,7 +171,7 @@ export function useIntercom(store) {
       client,
       (peerId, speaking) => storeRef.setPeerSpeaking(peerId, speaking),
       (errInfo) => {
-        if (__DEV__) console.warn('[useIntercom] WebRTC error:', errInfo);
+        logger.error('useIntercom', errInfo.error, { stage: errInfo.stage, peerId: errInfo.peerId });
       },
       (peerId, state) => storeRef.setPeerConnectionState(peerId, state),
       (speaking) => storeRef.setSelfSpeaking?.(speaking),
