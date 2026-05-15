@@ -1,10 +1,12 @@
 /**
  * VOX (Voice-Activated Transmit)
  *
- * Monitors mic amplitude via react-native-audio-record (low-rate PCM).
- * Gates the WebRTC audio track open/closed based on a dB threshold.
+ * Android: monitors mic amplitude via react-native-audio-record (PCM frames).
+ * iOS:     reads WebRTC `getStats()` media-source audioLevel (0..1), which
+ *          doesn't require opening a parallel mic capture (which would
+ *          conflict with WebRTC's AVAudioSession).
  *
- * Typical thresholds:
+ * Both paths normalize to dBFS so the threshold UI is identical:
  *   -50 dB  = very sensitive (quiet room)
  *   -40 dB  = default (light wind / normal speech)
  *   -30 dB  = less sensitive (loud wind / highway)
@@ -13,11 +15,11 @@ import { useRef, useState, useEffect } from 'react';
 import { Platform } from 'react-native';
 import { Recorder } from '../services/AudioRecorder';
 
-// iOS only allows one active audio input route at a time. WebRTC holds the
-// mic via getUserMedia, so opening RNAudioRecord in parallel either fails or
-// degrades the WebRTC capture. We skip the level meter on iOS and report
-// "always speaking" so the audio track stays open whenever VOX is enabled.
-const VOX_LEVEL_AVAILABLE = Platform.OS !== 'ios';
+const IS_IOS = Platform.OS === 'ios';
+// iOS polls a level ref the WebRTCManager fills via getStats. Cadence matches
+// the manager's poll (~300ms). Slightly slower attack than Android PCM but
+// avoids the AVAudioSession conflict.
+const IOS_POLL_MS = 150;
 
 const SAMPLE_RATE = 8000;        // Hz — low enough for level-only monitoring
 const CHANNELS = 1;
@@ -37,7 +39,7 @@ const CALIBRATION_MAX_DB = -20;      // clamp so a noisy probe doesn't lock VOX 
 // NOTE: useVOX only observes mic amplitude and reports `speaking`.
 // It does NOT mutate track.enabled — that's owned by App.tsx, which knows
 // about muted/voxEnabled/speaking together and is the single source of truth.
-export function useVOX(localStream, enabled = true) {
+export function useVOX(localStream, enabled = true, localLevelRef = null) {
   const [speaking, setSpeaking] = useState(false);
   const [thresholdDb, setThresholdDb] = useState(DEFAULT_THRESHOLD_DB);
   const [calibrating, setCalibrating] = useState(false);
@@ -69,14 +71,6 @@ export function useVOX(localStream, enabled = true) {
       setSpeaking(false);
       return;
     }
-
-    // iOS: can't read mic level without conflicting with WebRTC. The gate is
-    // permanently open at the App.tsx level (see `transmit` below), but we
-    // do NOT report `speaking: true` for the UI — the green border is for
-    // actual voice activity, which we can't detect on iOS. Riders will see
-    // it light up on the OTHER iOS rider's row when they actually talk
-    // (driven by WebRTCManager's ontrack-derived "speaking" for remotes).
-    if (!VOX_LEVEL_AVAILABLE) return;
 
     const setGate = (open) => {
       if (speakingRef.current === open) return;
@@ -110,8 +104,7 @@ export function useVOX(localStream, enabled = true) {
       setThresholdDb(clamped);
     };
 
-    const onAudioData = (data) => {
-      const db = _rmsDb(data);
+    const onSample = (db) => {
       if (calibrationActive) {
         if (isFinite(db)) calibrationSamples.push(db);
         if (Date.now() >= calibrationDoneAt) finishCalibration();
@@ -124,22 +117,46 @@ export function useVOX(localStream, enabled = true) {
       }
     };
 
-    try {
-      Recorder.configure({
-        sampleRate: SAMPLE_RATE,
-        channels: CHANNELS,
-        bitsPerSample: BITS_PER_SAMPLE,
-        wavFile: '',
-      });
-      Recorder.setListener(onAudioData);
-      Recorder.start();
-    } catch (err) {
-      if (__DEV__) console.warn('[VOX] failed to start AudioRecord:', err?.message ?? err);
+    let iosTimer = null;
+    let stopRecorder = null;
+    if (IS_IOS) {
+      // iOS path: poll the WebRTCManager-supplied level ref. No peer
+      // connection → ref stays at 0 → calibration would lock at -inf, so we
+      // wait until we see a non-zero sample before starting the timer.
+      const tick = () => {
+        const level = localLevelRef?.current ?? 0;
+        // 0..1 → dBFS. level=0 → -Infinity (silent / no pc yet).
+        const db = level > 0 ? 20 * Math.log10(level) : -Infinity;
+        // Defer calibration start until WebRTC stats are flowing.
+        if (calibrationActive && calibrationSamples.length === 0 && !isFinite(db)) {
+          calibrationDoneAt = Date.now() + CALIBRATION_MS;
+          return;
+        }
+        onSample(db);
+      };
+      iosTimer = setInterval(tick, IOS_POLL_MS);
+    } else {
+      try {
+        Recorder.configure({
+          sampleRate: SAMPLE_RATE,
+          channels: CHANNELS,
+          bitsPerSample: BITS_PER_SAMPLE,
+          wavFile: '',
+        });
+        Recorder.setListener((data) => onSample(_rmsDb(data)));
+        Recorder.start();
+        stopRecorder = () => {
+          Recorder.setListener(null);
+          Recorder.stop();
+        };
+      } catch (err) {
+        if (__DEV__) console.warn('[VOX] failed to start AudioRecord:', err?.message ?? err);
+      }
     }
 
     return () => {
-      Recorder.setListener(null);
-      Recorder.stop();
+      if (iosTimer) clearInterval(iosTimer);
+      if (stopRecorder) stopRecorder();
       clearTimeout(holdTimer.current);
       speakingRef.current = false;
       setSpeaking(false);
@@ -147,9 +164,9 @@ export function useVOX(localStream, enabled = true) {
   }, [enabled, localStream, recalibrateNonce]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // `speaking`: should the UI show a "speaking" indicator (real voice activity).
-  // `transmit`: should the audio track be enabled — true on iOS where we can't
-  //   measure level, or follows `speaking` on Android where VOX is gating.
-  const transmit = VOX_LEVEL_AVAILABLE ? speaking : true;
+  // `transmit`: should the audio track be enabled — follows `speaking` on
+  // both platforms now that iOS has its own (getStats-based) level path.
+  const transmit = speaking;
   return {
     speaking,
     transmit,
@@ -157,7 +174,7 @@ export function useVOX(localStream, enabled = true) {
     setThresholdDb: setThresholdDbManual,
     calibrating,
     recalibrate,
-    levelAvailable: VOX_LEVEL_AVAILABLE,
+    levelAvailable: true,
   };
 }
 

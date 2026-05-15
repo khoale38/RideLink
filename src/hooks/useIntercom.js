@@ -17,6 +17,10 @@ export function useIntercom(store) {
   const signalingRef = useRef(null);
   const rtcRef = useRef(null);
   const hostingRef = useRef(false);
+  // Live 0..1 local mic level from WebRTC getStats. iOS useVOX polls this
+  // because it can't open a parallel mic capture; Android ignores it and
+  // reads PCM frames directly from RNAudioRecord instead.
+  const localLevelRef = useRef(0);
   const [localStream, setLocalStream] = useState(null);
 
   const leaveGroup = useCallback(() => {
@@ -170,6 +174,7 @@ export function useIntercom(store) {
       },
       (peerId, state) => storeRef.setPeerConnectionState(peerId, state),
       (speaking) => storeRef.setSelfSpeaking?.(speaking),
+      (level) => { localLevelRef.current = level; },
     );
     rtcRef.current = rtc;
 
@@ -179,5 +184,5 @@ export function useIntercom(store) {
     client.send({ type: 'join', name, isHost: !!opts.isHost, password: opts.password });
   }
 
-  return { hostGroup, joinGroup, leaveGroup, toggleMute, localStream };
+  return { hostGroup, joinGroup, leaveGroup, toggleMute, localStream, localLevelRef };
 }

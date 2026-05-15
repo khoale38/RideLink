@@ -16,10 +16,14 @@ const RTC_CONFIG = {
 };
 
 export class WebRTCManager {
-  constructor(signalingClient, onVoiceActivity, onError, onPeerState, onLocalVoiceActivity) {
+  constructor(signalingClient, onVoiceActivity, onError, onPeerState, onLocalVoiceActivity, onLocalAudioLevel) {
     this.signaling = signalingClient;
     this.onVoiceActivity = onVoiceActivity;
     this.onLocalVoiceActivity = onLocalVoiceActivity; // (speaking) — true when our mic is hot
+    // (level) — raw local audioLevel 0..1 from getStats media-source, fires
+    // every poll. Used by useVOX on iOS where opening a parallel mic capture
+    // would conflict with WebRTC's AVAudioSession.
+    this.onLocalAudioLevel = onLocalAudioLevel;
     this.onError = onError;
     this.onPeerState = onPeerState; // (peerId, state) — 'connecting' | 'connected' | 'failed'
     this.peers = new Map(); // peerId -> RTCPeerConnection
@@ -76,6 +80,7 @@ export class WebRTCManager {
         this.localSpeaking = localSpeaking;
         this.onLocalVoiceActivity?.(localSpeaking);
       }
+      this.onLocalAudioLevel?.(localLevel);
     }, POLL_MS);
   }
 

@@ -10,12 +10,12 @@ import { useVOX } from './src/hooks/useVOX';
 
 function App() {
   const store = useGroupStore();
-  const { hostGroup, joinGroup, leaveGroup, toggleMute, localStream } = useIntercom(store);
+  const { hostGroup, joinGroup, leaveGroup, toggleMute, localStream, localLevelRef } = useIntercom(store);
   const [screen, setScreen] = useState<'home' | 'group'>('home');
   const [voxEnabled, setVoxEnabled] = useState(true);
   const [busy, setBusy] = useState(false);
 
-  const vox = useVOX(localStream, screen === 'group' && voxEnabled && !store.muted);
+  const vox = useVOX(localStream, screen === 'group' && voxEnabled && !store.muted, localLevelRef);
 
   // Single source of truth for whether the mic audio track is transmitting.
   // - muted: never transmit
