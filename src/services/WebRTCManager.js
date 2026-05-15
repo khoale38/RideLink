@@ -69,6 +69,7 @@ export class WebRTCManager {
       if (this._localStatsPc) {
         try {
           const stats = await this._localStatsPc.getStats();
+          if (this.destroyed) return;
           stats.forEach((report) => {
             if (report.type === 'media-source' && typeof report.audioLevel === 'number') {
               if (report.audioLevel > localLevel) localLevel = report.audioLevel;
@@ -79,6 +80,7 @@ export class WebRTCManager {
       for (const [peerId, pc] of this.peers) {
         try {
           const stats = await pc.getStats();
+          if (this.destroyed) return;
           let remoteLevel = 0;
           stats.forEach((report) => {
             const isAudio = report.kind === 'audio' || report.mediaType === 'audio';
@@ -418,6 +420,7 @@ export class WebRTCManager {
   }
 
   destroy() {
+    if (this.destroyed) return;
     this.destroyed = true;
     this.disconnectTimers.forEach((t) => clearTimeout(t));
     this.disconnectTimers.clear();

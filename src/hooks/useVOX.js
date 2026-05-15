@@ -51,8 +51,13 @@ export function useVOX(localStream, enabled = true, localLevelRef = null) {
   const thresholdRef = useRef(thresholdDb);
   const holdTimer = useRef(null);
   const speakingRef = useRef(false);
+  // Mirrored as a ref so finishCalibration() can see slider moves that
+  // happened mid-calibration without forcing the effect to re-run on every
+  // manualOverride change (which would restart calibration).
+  const manualOverrideRef = useRef(manualOverride);
 
   useEffect(() => { thresholdRef.current = thresholdDb; }, [thresholdDb]);
+  useEffect(() => { manualOverrideRef.current = manualOverride; }, [manualOverride]);
 
   // Wrap setThresholdDb so any manual move flips us out of auto-mode.
   const setThresholdDbManual = (db) => {
@@ -91,6 +96,9 @@ export function useVOX(localStream, enabled = true, localLevelRef = null) {
     const finishCalibration = () => {
       calibrationActive = false;
       setCalibrating(false);
+      // If the rider moved the slider while calibration was running, respect
+      // their manual value — don't clobber it with the auto result.
+      if (manualOverrideRef.current) return;
       if (calibrationSamples.length === 0) return;
       // 90th-percentile noise floor: ignore the loudest 10% of frames (in case
       // the rider coughed during calibration), then take the highest of what
