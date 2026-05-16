@@ -100,7 +100,19 @@ function App() {
     // process kill) — leaving the signaling server and Android foreground
     // service alive across reloads. The store's setState calls happen
     // outside the React render path and won't warn here.
-    try { leaveGroupRef.current(); } catch (_) { /* ignore */ }
+    //
+    // leaveGroup() returns a Promise (the awaited native teardown of the
+    // foreground service / hotspot / TCP listener). On real unmount the JS
+    // context survives long enough for it to settle; on hot reload it may
+    // not, and the listener can briefly outlive JS — but at least the
+    // synchronous prefix (signaling.disconnect + rtc.destroy) always runs
+    // before we return, and the native re-bind has its own EADDRINUSE
+    // backoff. We swallow the rejection here so it doesn't surface as an
+    // unhandled-promise warning during the teardown window.
+    try {
+      const p = leaveGroupRef.current();
+      if (p && typeof p.catch === 'function') p.catch(() => {});
+    } catch (_) { /* ignore */ }
   }, []);
 
   return (

@@ -304,6 +304,13 @@ function _handleMessage(clientId, msg, onEvent) {
   }
 }
 
+// When `pendingDeadClients` is non-null we're inside a broadcast loop; a
+// failed write must NOT clean up synchronously (that would re-broadcast
+// peer_left mid-iteration, fan out to other failing sockets, and recurse
+// O(N²) on a mass disconnect). Instead we collect dead ids and drain them
+// once the outer broadcast completes.
+let pendingDeadClients = null;
+
 function _send(clientId, msg, onEvent) {
   const entry = clients.get(clientId);
   if (!entry?.socket) return;
@@ -311,10 +318,16 @@ function _send(clientId, msg, onEvent) {
     entry.socket.write(JSON.stringify(msg) + '\n');
   } catch (err) {
     if (__DEV__) console.warn('[SignalingServer] write to', clientId, 'failed:', err?.message ?? err);
-    // Route through the choke point so a write failure broadcasts peer_left
-    // like every other removal path — otherwise the dead peer would linger
-    // in everyone else's roster.
-    _cleanupClient(clientId, 'write_failed', onEvent);
+    if (pendingDeadClients) {
+      // Defer: outer _broadcast will drain after the current pass so the
+      // peer_left broadcast doesn't re-enter mid-iteration.
+      pendingDeadClients.add(clientId);
+    } else {
+      // Route through the choke point so a write failure broadcasts peer_left
+      // like every other removal path — otherwise the dead peer would linger
+      // in everyone else's roster.
+      _cleanupClient(clientId, 'write_failed', onEvent);
+    }
   }
 }
 
@@ -322,14 +335,34 @@ function _broadcast(msg, excludeId, onEvent) {
   // Only joined clients receive broadcasts. A half-open socket that hasn't
   // sent `join` yet has no business seeing peer_joined/peer_left/etc.
   //
-  // Two-pass: snapshot the recipient ids first so a re-entrant _cleanupClient
-  // (triggered by a failing _send) can't mutate the map mid-iteration. The
-  // recursive peer_left broadcast issued by that cleanup is then defer-safe.
-  const targets = [];
-  clients.forEach((entry, id) => {
-    if (id !== excludeId && entry.joined) targets.push(id);
-  });
-  for (const id of targets) {
-    if (clients.has(id)) _send(id, msg, onEvent);
+  // Re-entrancy: if we're already inside an outer broadcast (i.e. cleaning
+  // up a dead client whose peer_left is now fanning out), reuse the outer
+  // dead-set so a second-wave failure is also drained iteratively. Without
+  // this the second broadcast would create its own pendingDeadClients and
+  // shadow it on the stack — correct, but with deeper recursion than needed.
+  const top = pendingDeadClients === null;
+  if (top) pendingDeadClients = new Set();
+  try {
+    // Two-pass: snapshot the recipient ids first so a deferred cleanup (or
+    // any future map mutation) can't mutate the map mid-iteration.
+    const targets = [];
+    clients.forEach((entry, id) => {
+      if (id !== excludeId && entry.joined) targets.push(id);
+    });
+    for (const id of targets) {
+      if (clients.has(id)) _send(id, msg, onEvent);
+    }
+  } finally {
+    if (top) {
+      // Drain iteratively. Each cleanup may itself enqueue more dead clients
+      // (its peer_left broadcast hits another stuck socket); keep draining
+      // until the set is empty. Bounded by clients.size since every drain
+      // removes one entry from the map.
+      const dead = pendingDeadClients;
+      pendingDeadClients = null;
+      for (const id of dead) {
+        _cleanupClient(id, 'write_failed', onEvent);
+      }
+    }
   }
 }

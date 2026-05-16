@@ -160,6 +160,16 @@ export class WebRTCManager {
       currentMs = ms;
       this.speakingPoll = setTimeout(tick, ms);
     };
+    // UI callbacks invoked from tick (onVoiceActivity / onLocalVoiceActivity
+    // / onLocalAudioLevel) can throw if a downstream setter blows up (e.g.
+    // store mutation during teardown). Without this guard, a throw would
+    // skip the trailing schedule(nextMs) and the poll would silently die.
+    const safeNotify = (fn, label, ...args) => {
+      if (!fn) return;
+      try { fn(...args); } catch (err) {
+        logger.warn('WebRTC', `${label} handler threw`, { error: err?.message ?? String(err) });
+      }
+    };
     const tick = async () => {
       if (this.destroyed) return;
       let localLevel = 0;
@@ -197,16 +207,17 @@ export class WebRTCManager {
           const speaking = remoteLevel >= SPEAKING_THRESHOLD;
           if (entry.speaking !== speaking) {
             entry.speaking = speaking;
-            this.onVoiceActivity?.(peerId, speaking);
+            safeNotify(this.onVoiceActivity, 'onVoiceActivity', peerId, speaking);
           }
         } catch (_) { /* getStats can throw mid-teardown; ignore */ }
       }
       const localSpeaking = localLevel >= SPEAKING_THRESHOLD;
       if (this.localSpeaking !== localSpeaking) {
         this.localSpeaking = localSpeaking;
-        this.onLocalVoiceActivity?.(localSpeaking);
+        safeNotify(this.onLocalVoiceActivity, 'onLocalVoiceActivity', localSpeaking);
       }
-      this.onLocalAudioLevel?.(localLevel);
+      if (this.destroyed) return;
+      safeNotify(this.onLocalAudioLevel, 'onLocalAudioLevel', localLevel);
       if (this.destroyed) return;
       const nextMs = this.peers.size > 4 ? slowMs : fastMs;
       if (nextMs !== currentMs) {
@@ -278,38 +289,33 @@ export class WebRTCManager {
   // with discarding pcRemote's receivers — eliminates the playback path
   // entirely instead of suppressing it after the fact.
   async _ensureLocalStatsPc() {
-    if (this._localStatsPc || !this.localStream || this.destroyed) return;
     // Bound retries — a synchronously throwing RTCPeerConnection constructor
     // (broken native module, unsupported platform) would otherwise loop
-    // forever as every caller re-tries the recursive path below.
+    // forever as every caller re-tries the build path below. Iterative loop
+    // keeps the retry budget visible in one place; previously the same
+    // condition lived in two recursive tails (concurrent waiter + post-build)
+    // which made the worst-case call depth harder to reason about.
     const MAX_BUILD_ATTEMPTS = 3;
-    if ((this._localStatsPcAttempts ?? 0) >= MAX_BUILD_ATTEMPTS) return;
-    // In-flight guard: concurrent startLocalAudio calls (e.g. reconnect race)
-    // would otherwise each build a loopback pc pair; the first assignment
-    // would be orphaned with no close() ever called. Share the promise so
-    // every caller awaits the same single setup.
-    if (this._localStatsPcSetup) {
-      await this._localStatsPcSetup;
-      // If the in-flight build failed, _localStatsPc stays null. Let the
-      // next caller retry (up to MAX_BUILD_ATTEMPTS) instead of silently
-      // returning a half-init state.
-      if (!this._localStatsPc && !this.destroyed) return this._ensureLocalStatsPc();
-      return;
+    while (!this._localStatsPc && this.localStream && !this.destroyed) {
+      if ((this._localStatsPcAttempts ?? 0) >= MAX_BUILD_ATTEMPTS) return;
+      // In-flight guard: concurrent startLocalAudio calls (e.g. reconnect
+      // race) would otherwise each build a loopback pc pair; the first
+      // assignment would be orphaned with no close() ever called. Share the
+      // promise so every caller awaits the same single setup.
+      if (this._localStatsPcSetup) {
+        await this._localStatsPcSetup;
+        // If the in-flight build failed, _localStatsPc stays null and the
+        // loop condition retries (up to MAX_BUILD_ATTEMPTS).
+        continue;
+      }
+      this._localStatsPcAttempts = (this._localStatsPcAttempts ?? 0) + 1;
+      this._localStatsPcSetup = this._buildLocalStatsPc();
+      try {
+        await this._localStatsPcSetup;
+      } finally {
+        this._localStatsPcSetup = null;
+      }
     }
-    this._localStatsPcAttempts = (this._localStatsPcAttempts ?? 0) + 1;
-    this._localStatsPcSetup = this._buildLocalStatsPc();
-    try {
-      await this._localStatsPcSetup;
-    } finally {
-      this._localStatsPcSetup = null;
-    }
-    // Symmetry with the concurrent-waiter branch above: if this attempt
-    // failed but we still have budget under MAX_BUILD_ATTEMPTS, retry from
-    // the same caller. Otherwise the original builder gets exactly one shot
-    // while concurrent waiters get retried, which was the documented
-    // asymmetry. Stops naturally once attempts >= MAX_BUILD_ATTEMPTS via
-    // the guard at the top of this function.
-    if (!this._localStatsPc && !this.destroyed) return this._ensureLocalStatsPc();
   }
 
   async _buildLocalStatsPc() {
