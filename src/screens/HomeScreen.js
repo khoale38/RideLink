@@ -175,6 +175,10 @@ export function HomeScreen({ onHost, onJoin, busy = false }) {
         if (!pc) return;
         try {
           const stats = await pc.getStats();
+          // Re-check after await: stopMicTest() may have nulled the ref (and
+          // unmount may have set state to unsafe). Without this guard we'd
+          // dispatch a setMicLevel against a torn-down test session.
+          if (!pcLocalRef.current) return;
           let level = 0;
           stats.forEach((r) => {
             if (r.type === 'media-source' && typeof r.audioLevel === 'number') {
