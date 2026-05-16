@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import {
   View, Text, TextInput, TouchableOpacity, StyleSheet, Platform, Linking, Alert,
-  Keyboard, TouchableWithoutFeedback, ScrollView,
+  Keyboard, TouchableWithoutFeedback, ScrollView, Image,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import DeviceInfo from 'react-native-device-info';
@@ -245,7 +245,12 @@ export function HomeScreen({ onHost, onJoin, busy = false }) {
       keyboardShouldPersistTaps="handled"
       showsVerticalScrollIndicator={false}
     >
-      <Text style={styles.logo}>RideLink</Text>
+      <Image
+        source={require('../../assets/RideLink.png')}
+        style={styles.logo}
+        resizeMode="contain"
+        accessibilityLabel="RideLink"
+      />
       <Text style={styles.sub}>Offline motorcycle intercom</Text>
 
       {!micGranted && (
@@ -432,7 +437,7 @@ const styles = StyleSheet.create({
     flexGrow: 1, backgroundColor: '#0d0d0d',
     alignItems: 'center', justifyContent: 'center', padding: 24,
   },
-  logo: { fontSize: 42, fontWeight: '800', color: '#f5a623', letterSpacing: 2 },
+  logo: { width: 120, height: 120, marginBottom: 8 },
   sub: { color: '#888', marginBottom: 40, fontSize: 14 },
   input: {
     width: '100%', borderWidth: 1, borderColor: '#333',
