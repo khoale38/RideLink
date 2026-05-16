@@ -295,6 +295,11 @@ export class WebRTCManager {
       const offer = await pc.createOffer();
       if (this.destroyed) return;
       await pc.setLocalDescription(offer);
+      // Identity check: between the awaits above, _removePeer (teardown,
+      // peer_left, glare rebuild) may have replaced or dropped this pc. Don't
+      // send a stale offer or arm a watchdog against an instance no longer in
+      // the map — mirrors the guard in onicecandidate.
+      if (this.peers.get(peerId) !== pc) return;
       this.signaling.send({ type: 'offer', to: peerId, sdp: offer });
       this._armOfferWatchdog(peerId);
     } catch (err) {
@@ -345,6 +350,9 @@ export class WebRTCManager {
       const offer = await pc.createOffer({ iceRestart: true });
       if (this.destroyed) return;
       await pc.setLocalDescription(offer);
+      // Same identity guard as callPeer: a teardown or glare-rebuild during
+      // the awaits could have replaced this pc; don't push a stale offer.
+      if (this.peers.get(peerId) !== pc) return;
       this.signaling.send({ type: 'offer', to: peerId, sdp: offer });
       this._armOfferWatchdog(peerId);
       this.onPeerState?.(peerId, 'connecting');
