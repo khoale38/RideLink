@@ -4,7 +4,6 @@ import { SignalingClient } from '../services/SignalingClient';
 import { WebRTCManager } from '../services/WebRTCManager';
 import { startSignalingServer, stopSignalingServer, SIGNALING_PORT } from '../services/SignalingServer';
 import {
-  getGatewayIP,
   resolveGatewayIP,
   requestLocationPermission,
   requestMicPermission,
@@ -29,23 +28,33 @@ export function useIntercom(store, { onKicked } = {}) {
   const localLevelRef = useRef(0);
   const [localStream, setLocalStream] = useState(null);
 
-  const leaveGroup = useCallback(() => {
+  const leaveGroup = useCallback(async () => {
     // Disconnect signaling FIRST so any in-flight handlers (offer/answer/ice)
     // can't call into a half-destroyed WebRTC manager.
     try { signalingRef.current?.disconnect(); } catch (_) { /* ignore */ }
     try { rtcRef.current?.destroy(); } catch (_) { /* ignore */ }
+    let stopServer = Promise.resolve();
     if (hostingRef.current) {
-      try { stopSignalingServer(); } catch (_) { /* ignore */ }
+      try { stopServer = stopSignalingServer(); } catch (_) { /* ignore */ }
       hostingRef.current = false;
     }
-    stopIntercomService();
-    stopLocalHotspot();
     rtcRef.current = null;
     signalingRef.current = null;
     setLocalStream(null);
     // Single canonical reset — clears role, connected, peers, hotspot info,
-    // self-speaking, and mute together.
+    // self-speaking, and mute together. Run synchronously so the UI flips
+    // immediately even though native teardown below is async.
     store.reset?.();
+    // Await native teardown so an immediate re-host doesn't race a still-
+    // running foreground service or a half-closed listening socket
+    // (which would otherwise throw EADDRINUSE on the next bind).
+    try {
+      await Promise.all([
+        stopServer,
+        stopIntercomService(),
+        stopLocalHotspot(),
+      ]);
+    } catch (_) { /* best-effort */ }
   }, [store]);
 
   const hostGroup = useCallback(async (name) => {
@@ -86,7 +95,7 @@ export function useIntercom(store, { onKicked } = {}) {
       // signaling client has joined — don't make the user wait for a guest.
       store.setConnected(true);
     } catch (err) {
-      leaveGroup();
+      await leaveGroup();
       throw err;
     }
   }, [store, leaveGroup]);
@@ -117,7 +126,7 @@ export function useIntercom(store, { onKicked } = {}) {
       const gateway = await resolveGatewayIP();
       await _connect(gateway, name, store, {});
     } catch (err) {
-      leaveGroup();
+      await leaveGroup();
       throw err;
     }
   }, [store, leaveGroup]);

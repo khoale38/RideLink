@@ -127,18 +127,32 @@ export class SignalingClient {
         }
       });
 
+      // Per-socket latch: both 'error' and 'close' typically fire for the
+      // same disconnect; without this, the second one races with the
+      // reconnect timer (if the first scheduled attempt has already fired,
+      // the early `if (this.reconnectTimer)` guard no longer blocks, and
+      // reconnectAttempt double-advances).
+      let dead = false;
+      const markDead = () => {
+        if (dead) return;
+        dead = true;
+        this.connected = false;
+        this._scheduleReconnect();
+      };
+
       this.socket.on('error', (err) => {
         if (!settled) {
           finish(err instanceof Error ? err : new Error(String(err)));
         }
-        this.connected = false;
-        this._scheduleReconnect();
+        markDead();
       });
 
       this.socket.on('close', () => {
-        this.connected = false;
-        this.handlers.disconnected?.();
-        this._scheduleReconnect();
+        // disconnected fires once per real disconnect (only after we ever
+        // connected — pre-connect 'close' from a failed initial dial is
+        // surfaced to the caller via the rejected connect() promise instead).
+        if (!dead && this.everConnected) this.handlers.disconnected?.();
+        markDead();
       });
     });
   }

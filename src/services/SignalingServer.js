@@ -162,7 +162,7 @@ export function startSignalingServer(onEvent) {
 }
 
 export function stopSignalingServer() {
-  if (!server) return;
+  if (!server) return Promise.resolve();
   // Tell guests we're closing on purpose so their UI can route home instead
   // of showing "Connecting…" forever. Sent before destroy() so the byte
   // hits the wire before the FIN.
@@ -175,8 +175,25 @@ export function stopSignalingServer() {
     try { entry.socket.destroy(); } catch (_) { /* ignore */ }
   });
   clients.clear();
-  try { server.close(); } catch (_) { /* ignore */ }
+  // Wait for the listener to actually release the port. Without this an
+  // immediate re-host (leaveGroup → hostGroup) can race against the FIN
+  // teardown and trip EADDRINUSE on the next listen().
+  const closing = server;
   server = null;
+  return new Promise((resolve) => {
+    let settled = false;
+    const done = () => { if (!settled) { settled = true; resolve(); } };
+    try {
+      closing.close(() => done());
+    } catch (_) {
+      done();
+      return;
+    }
+    // Belt-and-suspenders: react-native-tcp-socket's close() callback isn't
+    // guaranteed to fire if there are no active connections. Cap the wait
+    // at 1s so leaveGroup never hangs.
+    setTimeout(done, 1000);
+  });
 }
 
 function _handleMessage(clientId, msg, onEvent) {

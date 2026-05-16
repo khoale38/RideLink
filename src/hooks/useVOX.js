@@ -88,9 +88,11 @@ export function useVOX(localStream, enabled = true, localLevelRef = null) {
 
     // Calibration window state — sample the noise floor before gating starts.
     // Skipped when the user has manually moved the slider this session.
+    // The deadline is anchored to the FIRST finite sample (set once, never
+    // pushed forward) so a transient zero mid-calibration can't re-arm it.
     let calibrationActive = !manualOverride;
     const calibrationSamples = [];
-    let calibrationDoneAt = calibrationActive ? Date.now() + CALIBRATION_MS : 0;
+    let calibrationDoneAt = 0; // set on first finite sample
     if (calibrationActive) setCalibrating(true);
 
     const finishCalibration = () => {
@@ -117,8 +119,14 @@ export function useVOX(localStream, enabled = true, localLevelRef = null) {
 
     const onSample = (db) => {
       if (calibrationActive) {
-        if (isFinite(db)) calibrationSamples.push(db);
-        if (Date.now() >= calibrationDoneAt) finishCalibration();
+        if (isFinite(db)) {
+          // Anchor the deadline on the first audible sample so the window
+          // is "first sample → first sample + CALIBRATION_MS" regardless of
+          // how long we waited for stats / mic frames to start flowing.
+          if (calibrationDoneAt === 0) calibrationDoneAt = Date.now() + CALIBRATION_MS;
+          calibrationSamples.push(db);
+        }
+        if (calibrationDoneAt > 0 && Date.now() >= calibrationDoneAt) finishCalibration();
         return; // don't gate during calibration
       }
       if (db >= thresholdRef.current) {
@@ -139,19 +147,15 @@ export function useVOX(localStream, enabled = true, localLevelRef = null) {
         const level = localLevelRef?.current ?? 0;
         // 0..1 → dBFS. level=0 → -Infinity (silent / no pc yet).
         const db = level > 0 ? 20 * Math.log10(level) : -Infinity;
-        // Defer calibration start until WebRTC stats are flowing.
-        if (calibrationActive && calibrationSamples.length === 0 && !isFinite(db)) {
-          calibrationDoneAt = Date.now() + CALIBRATION_MS;
-          // Fallback: if no peer has connected after 8s, give up on
-          // calibration so the rider isn't gated shut while waiting alone.
-          // The default threshold takes over and the next recalibrate call
-          // (or auto-recalibrate on next session) will replace it.
-          if (Date.now() - startedAt > 8000) {
-            logger.warn('VOX', 'no audio level yet — falling back to default threshold');
-            calibrationActive = false;
-            setCalibrating(false);
-            setCalibrationFailed(true);
-          }
+        // Fallback: if no audible sample has arrived after 8s (e.g. solo
+        // host with no remote stats), give up on calibration so the rider
+        // isn't gated shut while waiting alone. The default threshold takes
+        // over; a manual recalibrate replaces it later.
+        if (calibrationActive && calibrationSamples.length === 0 && Date.now() - startedAt > 8000) {
+          logger.warn('VOX', 'no audio level yet — falling back to default threshold');
+          calibrationActive = false;
+          setCalibrating(false);
+          setCalibrationFailed(true);
           return;
         }
         onSample(db);

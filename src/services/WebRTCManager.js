@@ -187,6 +187,16 @@ export class WebRTCManager {
       if (this.destroyed) { try { pc.close(); } catch (_) {} try { pcRemote.close(); } catch (_) {} return; }
       await pc.setLocalDescription(offer);
       await pcRemote.setRemoteDescription(offer);
+      // Disable any received tracks BEFORE the answer is set — on some
+      // react-native-webrtc builds the platform starts routing decoded audio
+      // to the device speaker as soon as setLocalDescription(answer) runs,
+      // which is earlier than the 'track' event in step below. Doing it here
+      // closes the few-ms loopback window.
+      try {
+        pcRemote.getReceivers?.().forEach((r) => {
+          if (r?.track) { try { r.track.enabled = false; } catch (_) { /* ignore */ } }
+        });
+      } catch (_) { /* ignore */ }
       const answer = await pcRemote.createAnswer();
       await pcRemote.setLocalDescription(answer);
       await pc.setRemoteDescription(answer);
