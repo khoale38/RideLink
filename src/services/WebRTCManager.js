@@ -173,6 +173,20 @@ export class WebRTCManager {
   // uses and is what lets a solo host's "speaking" indicator light up.
   async _ensureLocalStatsPc() {
     if (this._localStatsPc || !this.localStream || this.destroyed) return;
+    // In-flight guard: concurrent startLocalAudio calls (e.g. reconnect race)
+    // would otherwise each build a loopback pc pair; the first assignment
+    // would be orphaned with no close() ever called. Share the promise so
+    // every caller awaits the same single setup.
+    if (this._localStatsPcSetup) return this._localStatsPcSetup;
+    this._localStatsPcSetup = this._buildLocalStatsPc();
+    try {
+      await this._localStatsPcSetup;
+    } finally {
+      this._localStatsPcSetup = null;
+    }
+  }
+
+  async _buildLocalStatsPc() {
     const pc = new RTCPeerConnection(RTC_CONFIG);
     const pcRemote = new RTCPeerConnection(RTC_CONFIG);
     try {
@@ -319,12 +333,16 @@ export class WebRTCManager {
     // Glare tie-break needs our own id. If an offer arrives before peer_list
     // has set it (rare race on first join), buffer until setMyId() replays.
     if (!this.myId) {
-      // Cap the queue so a peer that never sees us reach setMyId (signaling
-      // failure mid-join, or the resetPeers→peer_list window) can't pin
-      // memory indefinitely by re-sending offers.
-      const MAX_PENDING_OFFERS = 16;
-      if (this.pendingOffers.length >= MAX_PENDING_OFFERS) this.pendingOffers.shift();
-      this.pendingOffers.push(msg);
+      // Dedupe by `from`: only the latest offer per peer matters (a re-offer
+      // supersedes any earlier one from the same peer). This bounds the
+      // queue to N peers without FIFO-dropping legitimate offers from
+      // different peers during large-group reconnect storms.
+      const existingIdx = this.pendingOffers.findIndex((m) => m.from === msg.from);
+      if (existingIdx !== -1) {
+        this.pendingOffers[existingIdx] = msg;
+      } else {
+        this.pendingOffers.push(msg);
+      }
       return;
     }
 
@@ -353,6 +371,10 @@ export class WebRTCManager {
       // Polite side: tear down the in-flight local pc and accept the remote
       // offer on a fresh one. _createPeerConnection short-circuits when the
       // peer is already present, so the removal must happen first.
+      // No new offer watchdog needed on the rebuilt pc — we'll be the
+      // answerer here, so signalingState moves stable→have-remote-offer→
+      // stable without ever sitting in have-local-offer. The watchdog only
+      // guards the unanswered-local-offer deadlock.
       this._removePeer(msg.from);
     }
 
@@ -442,9 +464,14 @@ export class WebRTCManager {
     const pc = new RTCPeerConnection(RTC_CONFIG);
 
     pc.onicecandidate = ({ candidate }) => {
-      if (candidate) {
-        this.signaling.send({ type: 'ice_candidate', to: peerId, candidate });
-      }
+      // Identity check: a torn-down pc can still emit a trailing candidate
+      // (the native side flushes its gatherer). Sending it to a peer we've
+      // already removed (or worse, a rebuilt pc replaced this one in the
+      // map) wastes bandwidth and confuses the remote. Drop unless the map
+      // still points at THIS pc instance.
+      if (!candidate) return;
+      if (this.peers.get(peerId) !== pc) return;
+      this.signaling.send({ type: 'ice_candidate', to: peerId, candidate });
     };
 
     pc.ontrack = (_event) => {

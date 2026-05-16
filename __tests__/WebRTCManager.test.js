@@ -152,17 +152,20 @@ test('_handleAnswer: ignores answer when signalingState is not have-local-offer 
   rtc.destroy();
 });
 
-test('pendingOffers is capped to prevent unbounded growth before setMyId', async () => {
+test('pendingOffers dedupes by peer before setMyId', async () => {
   RTCPeerConnection.mockImplementation(() => makePc());
   const signaling = makeSignaling();
   const rtc = new WebRTCManager(signaling, jest.fn(), jest.fn(), jest.fn(), jest.fn());
-  // Push more than the cap (16) of pre-setMyId offers.
+  // 25 distinct peers: each kept (queue is bounded by N peers, not a magic cap).
   for (let i = 0; i < 25; i++) {
     await rtc._handleOffer({ from: `peer-${i}`, sdp: { type: 'offer', sdp: 'x' } });
   }
-  expect(rtc.pendingOffers.length).toBeLessThanOrEqual(16);
-  // FIFO: oldest dropped, newest retained.
-  expect(rtc.pendingOffers[rtc.pendingOffers.length - 1].from).toBe('peer-24');
+  expect(rtc.pendingOffers.length).toBe(25);
+  // Re-offer from an existing peer supersedes the prior one — no duplicate entry.
+  await rtc._handleOffer({ from: 'peer-3', sdp: { type: 'offer', sdp: 'x2' } });
+  expect(rtc.pendingOffers.length).toBe(25);
+  const entry = rtc.pendingOffers.find((m) => m.from === 'peer-3');
+  expect(entry.sdp.sdp).toBe('x2');
   rtc.destroy();
 });
 

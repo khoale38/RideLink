@@ -68,8 +68,7 @@ export function startSignalingServer(onEvent) {
       const entry = clients.get(clientId);
       if (entry && !entry.joined) {
         logger.warn('SignalingServer', 'join timeout — dropping idle socket', { clientId });
-        try { entry.socket.destroy(); } catch (_) { /* ignore */ }
-        clients.delete(clientId);
+        _cleanupClient(clientId, 'join_timeout', onEvent);
       }
     }, JOIN_TIMEOUT_MS);
     clients.set(clientId, { socket, name: null, buffer: EMPTY_BUF, joined: false, isHost: false, joinTimer, remoteAddress });
@@ -84,8 +83,7 @@ export function startSignalingServer(onEvent) {
       entry.buffer = entry.buffer.length ? Buffer.concat([entry.buffer, chunk]) : chunk;
       if (entry.buffer.length > MAX_BUFFER_BYTES) {
         if (__DEV__) console.warn('[SignalingServer] buffer overflow, dropping client', clientId);
-        try { entry.socket.destroy(); } catch (_) { /* ignore */ }
-        clients.delete(clientId);
+        _cleanupClient(clientId, 'buffer_overflow', onEvent);
         return;
       }
 
@@ -95,8 +93,7 @@ export function startSignalingServer(onEvent) {
         entry.buffer = entry.buffer.subarray(nl + 1);
         if (lineBuf.length > MAX_LINE_BYTES) {
           logger.warn('SignalingServer', 'oversized message dropped — closing client', { clientId, bytes: lineBuf.length });
-          try { entry.socket.destroy(); } catch (_) { /* ignore */ }
-          clients.delete(clientId);
+          _cleanupClient(clientId, 'oversized_line', onEvent);
           return;
         }
         const line = lineBuf.toString('utf8');
@@ -124,42 +121,12 @@ export function startSignalingServer(onEvent) {
     });
 
     socket.on('close', () => {
-      const entry = clients.get(clientId);
-      if (entry) {
-        clearTimeout(entry.joinTimer);
-        // Only notify peers about clients that actually joined — pre-join
-        // sockets never appeared in any peer list, so a peer_left would be
-        // a phantom event.
-        if (entry.joined) {
-          _broadcast({ type: 'peer_left', id: clientId, name: entry.name }, clientId);
-          if (!entry.isHost) {
-            onEvent?.({ type: 'peer_left', id: clientId, name: entry.name });
-          }
-        }
-      }
-      clients.delete(clientId);
+      _cleanupClient(clientId, 'close', onEvent);
     });
 
     socket.on('error', (err) => {
       if (__DEV__) console.warn('[SignalingServer] client socket error:', err?.message ?? err);
-      const entry = clients.get(clientId);
-      if (entry) {
-        clearTimeout(entry.joinTimer);
-        // If the peer had already joined, tell everyone else it's gone. The
-        // 'close' handler usually does this, but when 'error' fires first
-        // (e.g. ECONNRESET on a crashed device) and we delete the client
-        // here, the subsequent 'close' handler finds nothing to broadcast.
-        // Without this, the dead peer lingers in everyone's roster until
-        // they each detect WebRTC failure independently.
-        if (entry.joined) {
-          _broadcast({ type: 'peer_left', id: clientId, name: entry.name }, clientId);
-          if (!entry.isHost) {
-            onEvent?.({ type: 'peer_left', id: clientId, name: entry.name });
-          }
-        }
-        try { entry.socket.destroy(); } catch (_) { /* ignore */ }
-      }
-      clients.delete(clientId);
+      _cleanupClient(clientId, 'error', onEvent);
     });
   });
 
@@ -218,6 +185,30 @@ export function stopSignalingServer() {
   });
 }
 
+// Single choke point for client removal. Idempotent: flips `joined` to false
+// before broadcasting so any subsequent socket event (close after error, or
+// destroy-triggered re-entrancy) is a no-op. Always destroys the socket and
+// deletes the map entry. Broadcasting peer_left is conditional on the client
+// having joined — pre-join sockets never appeared in any peer list.
+function _cleanupClient(clientId, reason, onEvent) {
+  const entry = clients.get(clientId);
+  if (!entry) return;
+  clients.delete(clientId);
+  clearTimeout(entry.joinTimer);
+  const wasJoined = entry.joined;
+  entry.joined = false;
+  if (wasJoined) {
+    _broadcast({ type: 'peer_left', id: clientId, name: entry.name }, clientId);
+    if (!entry.isHost) {
+      onEvent?.({ type: 'peer_left', id: clientId, name: entry.name });
+    }
+  }
+  try { entry.socket.destroy(); } catch (_) { /* ignore */ }
+  if (__DEV__ && reason !== 'close') {
+    console.warn('[SignalingServer] cleaned up client', clientId, 'reason:', reason);
+  }
+}
+
 function _handleMessage(clientId, msg, onEvent) {
   const entry = clients.get(clientId);
   if (!entry || !msg || typeof msg.type !== 'string') return;
@@ -228,8 +219,7 @@ function _handleMessage(clientId, msg, onEvent) {
   // can't send anonymous offers/ICE before being added to the roster.
   if (!entry.joined && msg.type !== 'join') {
     logger.warn('SignalingServer', 'pre-join message dropped', { type: msg.type, clientId });
-    try { entry.socket.destroy(); } catch (_) { /* ignore */ }
-    clients.delete(clientId);
+    _cleanupClient(clientId, 'pre_join_violation', onEvent);
     return;
   }
 
@@ -252,7 +242,7 @@ function _handleMessage(clientId, msg, onEvent) {
       clients.forEach((c, id) => {
         if (id !== clientId && c.name) peers.push({ id, name: c.name });
       });
-      _send(clientId, { type: 'peer_list', peers, yourId: clientId });
+      _send(clientId, { type: 'peer_list', peers, yourId: clientId }, onEvent);
       _broadcast({ type: 'peer_joined', id: clientId, name: msg.name }, clientId);
       // Skip notifying the local listener about the host's own loopback
       // connection — the host already represents itself in the UI.
@@ -288,7 +278,16 @@ function _handleMessage(clientId, msg, onEvent) {
           return;
         }
       }
-      _send(msg.to, { ...msg, from: clientId });
+      // Whitelist relayed fields. Spreading the whole `msg` would forward
+      // any unknown keys a buggy/hostile peer tacked on. Receiving WebRTC
+      // stack only needs type + payload + from.
+      const relay = { type: msg.type, to: msg.to, from: clientId };
+      if (msg.type === 'offer' || msg.type === 'answer') {
+        relay.sdp = msg.sdp;
+      } else {
+        relay.candidate = msg.candidate;
+      }
+      _send(msg.to, relay, onEvent);
       break;
     }
     default:
@@ -296,21 +295,29 @@ function _handleMessage(clientId, msg, onEvent) {
   }
 }
 
-function _send(clientId, msg) {
+function _send(clientId, msg, onEvent) {
   const entry = clients.get(clientId);
   if (!entry?.socket) return;
   try {
     entry.socket.write(JSON.stringify(msg) + '\n');
   } catch (err) {
     if (__DEV__) console.warn('[SignalingServer] write to', clientId, 'failed:', err?.message ?? err);
-    try { entry.socket.destroy(); } catch (_) { /* ignore */ }
-    clients.delete(clientId);
+    // Route through the choke point so a write failure broadcasts peer_left
+    // like every other removal path — otherwise the dead peer would linger
+    // in everyone else's roster.
+    _cleanupClient(clientId, 'write_failed', onEvent);
   }
 }
 
 function _broadcast(msg, excludeId) {
   // Only joined clients receive broadcasts. A half-open socket that hasn't
   // sent `join` yet has no business seeing peer_joined/peer_left/etc.
+  //
+  // Note: _send is called here without an `onEvent` callback. If a broadcast
+  // write fails, we still cleanup the target client, but the host-side
+  // onEvent notification for that recursive peer_left is skipped to avoid
+  // re-entrant fan-out during the outer broadcast loop. The next socket
+  // 'close' event for that client will deliver the host-side notification.
   clients.forEach((entry, id) => {
     if (id !== excludeId && entry.joined) _send(id, msg);
   });

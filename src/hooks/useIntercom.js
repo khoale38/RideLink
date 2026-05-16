@@ -28,7 +28,11 @@ export function useIntercom(store, { onKicked } = {}) {
   const localLevelRef = useRef(0);
   const [localStream, setLocalStream] = useState(null);
 
-  const leaveGroup = useCallback(async () => {
+  // Single recovery primitive. Every teardown path (user leave, hostGroup/
+  // joinGroup error, _connect failure) routes through here so native
+  // resources (foreground service, hotspot, signaling server) are always
+  // awaited together — no callsite can leak by forgetting one.
+  const _cleanupSession = useCallback(async ({ resetStore } = { resetStore: true }) => {
     // Disconnect signaling FIRST so any in-flight handlers (offer/answer/ice)
     // can't call into a half-destroyed WebRTC manager.
     try { signalingRef.current?.disconnect(); } catch (_) { /* ignore */ }
@@ -41,10 +45,12 @@ export function useIntercom(store, { onKicked } = {}) {
     rtcRef.current = null;
     signalingRef.current = null;
     setLocalStream(null);
-    // Single canonical reset — clears role, connected, peers, hotspot info,
-    // self-speaking, and mute together. Run synchronously so the UI flips
-    // immediately even though native teardown below is async.
-    store.reset?.();
+    if (resetStore) {
+      // Single canonical reset — clears role, connected, peers, hotspot info,
+      // self-speaking, and mute together. Run synchronously so the UI flips
+      // immediately even though native teardown below is async.
+      store.reset?.();
+    }
     // Await native teardown so an immediate re-host doesn't race a still-
     // running foreground service or a half-closed listening socket
     // (which would otherwise throw EADDRINUSE on the next bind).
@@ -56,6 +62,8 @@ export function useIntercom(store, { onKicked } = {}) {
       ]);
     } catch (_) { /* best-effort */ }
   }, [store]);
+
+  const leaveGroup = useCallback(() => _cleanupSession(), [_cleanupSession]);
 
   const hostGroup = useCallback(async (name) => {
     try {
@@ -219,11 +227,13 @@ export function useIntercom(store, { onKicked } = {}) {
       setLocalStream(stream);
       client.send({ type: 'join', name, isHost: !!opts.isHost });
     } catch (err) {
-      try { rtc.destroy(); } catch (_) { /* ignore */ }
-      try { client.disconnect(); } catch (_) { /* ignore */ }
-      if (rtcRef.current === rtc) rtcRef.current = null;
-      if (signalingRef.current === client) signalingRef.current = null;
-      setLocalStream(null);
+      // Full teardown so a half-init manager (no stream, stats pc not stood
+      // up) isn't left in rtcRef AND any native resource the outer caller
+      // already started (foreground service, hotspot, signaling server) is
+      // awaited shut. The outer hostGroup/joinGroup catch also calls
+      // leaveGroup, but routing through the shared primitive here keeps
+      // future callers of _connect from leaking those resources.
+      await _cleanupSession({ resetStore: false });
       throw err;
     }
   }
