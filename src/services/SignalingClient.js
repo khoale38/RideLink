@@ -93,7 +93,10 @@ export class SignalingClient {
             this.everConnected = true;
             finish();
             if (wasReconnect) {
-              // Replay join so the server re-adds us to the peer list.
+              // Replay join so the server re-adds us to the peer list. This
+              // depends on `this.connected = true` already being set above —
+              // `send()` short-circuits when connected is false. If you
+              // reorder this block, make sure connected is flipped first.
               if (this.joinPayload) this.send(this.joinPayload);
               this.handlers.reconnected?.();
             }

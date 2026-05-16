@@ -219,7 +219,11 @@ export class WebRTCManager {
   // pair removed — if `media-source` audioLevel is now populated from a
   // single pc with only setLocalDescription, delete _ensureLocalStatsPc /
   // _buildLocalStatsPc / _localStatsPc* entirely and just call getStats()
-  // on a peer pc (or a single dummy pc) directly.
+  // on a peer pc (or a single dummy pc) directly. Alternative simplification
+  // if the upstream bug stays: replace the double track-disable hack with a
+  // `pcRemote.addTransceiver('audio', { direction: 'recvonly' })` combined
+  // with discarding pcRemote's receivers — eliminates the playback path
+  // entirely instead of suppressing it after the fact.
   async _ensureLocalStatsPc() {
     if (this._localStatsPc || !this.localStream || this.destroyed) return;
     // Bound retries — a synchronously throwing RTCPeerConnection constructor
@@ -246,6 +250,13 @@ export class WebRTCManager {
     } finally {
       this._localStatsPcSetup = null;
     }
+    // Symmetry with the concurrent-waiter branch above: if this attempt
+    // failed but we still have budget under MAX_BUILD_ATTEMPTS, retry from
+    // the same caller. Otherwise the original builder gets exactly one shot
+    // while concurrent waiters get retried, which was the documented
+    // asymmetry. Stops naturally once attempts >= MAX_BUILD_ATTEMPTS via
+    // the guard at the top of this function.
+    if (!this._localStatsPc && !this.destroyed) return this._ensureLocalStatsPc();
   }
 
   async _buildLocalStatsPc() {
@@ -441,6 +452,11 @@ export class WebRTCManager {
       return;
     }
 
+    // Buffered ICE candidates that need to survive a polite-glare rebuild.
+    // Declared at function scope so the post-rebuild block can re-seed the
+    // new entry without smuggling state through the msg argument.
+    let preserved = null;
+
     // Offer glare / mid-renegotiation: if we already have a pc with this peer
     // that is NOT in 'stable', applying setRemoteDescription will throw
     // InvalidStateError. Perfect-negotiation tie-break — the lexicographically
@@ -477,21 +493,13 @@ export class WebRTCManager {
       // we stand up the new pc. Candidates with stale ufrag from a prior
       // session will be rejected by the WebRTC stack on flush (logged
       // non-fatally), so the worst case is a few harmless warnings.
-      const preservedCandidates = existing.pendingCandidates;
+      preserved = existing.pendingCandidates;
       this._removePeer(msg.from);
-      if (preservedCandidates.length) {
-        // Re-seed the buffer on the new entry below by stashing on `msg`
-        // briefly — but the new entry doesn't exist yet, so hold via a local.
-        msg.__preservedCandidates = preservedCandidates;
-      }
     }
 
     const entry = this._createPeerConnection(msg.from);
     if (!entry) return;
-    if (msg.__preservedCandidates) {
-      entry.pendingCandidates = msg.__preservedCandidates;
-      delete msg.__preservedCandidates;
-    }
+    if (preserved && preserved.length) entry.pendingCandidates = preserved;
     // Arm the negotiation watchdog before any awaits — covers the answerer
     // side, so a stall in setRemoteDescription/createAnswer/setLocalDescription
     // can't leave the pc parked in 'have-remote-offer' forever.
@@ -626,30 +634,49 @@ export class WebRTCManager {
       // driven by getStats polling (_startSpeakingPoll), not by this event.
     };
 
+    // Reset the ICE-restart backoff as soon as ICE itself is healthy. The
+    // connectionState='connected' branch below also resets, but on some
+    // builds connectionState lags or never advances past 'connecting' even
+    // while iceConnectionState is 'connected' (and media flows). Without this,
+    // a flapping link could keep climbing toward ICE_RESTART_MAX_ATTEMPTS
+    // despite each restart actually making partial progress.
+    pc.oniceconnectionstatechange = () => {
+      if (entry.closed) return;
+      const ice = pc.iceConnectionState;
+      if (ice === 'connected' || ice === 'completed') {
+        entry.restartAttempts = 0;
+      }
+    };
+
     pc.onconnectionstatechange = () => {
       if (entry.closed) return;
       const state = pc.connectionState;
+      // Unified restart scheduler. 'disconnected' is usually transient
+      // (brief radio drop) so the first hit waits a generous DISCONNECT_GRACE
+      // window before kicking a restart; 'failed' is definitively broken so
+      // we go straight to the backoff schedule. Both paths consult the SAME
+      // restartAttempts counter so an oscillating disconnected↔failed link
+      // can't reset the timer to the fixed 5s grace value and defeat the
+      // exponential backoff on every flap.
+      const DISCONNECT_GRACE_MS = 5000;
       if (state === 'connecting' || state === 'new') {
         this.onPeerState?.(peerId, 'connecting');
       } else if (state === 'connected') {
         this._clearDisconnectTimer(entry);
         entry.restartAttempts = 0; // healthy — reset backoff
         this.onPeerState?.(peerId, 'connected');
-      } else if (state === 'disconnected') {
-        // Often transient (brief radio drop). Give it 5s to recover on its own
-        // before driving an explicit ICE restart from the initiator side.
+      } else if (state === 'disconnected' || state === 'failed') {
         this.onPeerState?.(peerId, 'connecting');
-        this._scheduleIceRestart(entry, 5000);
-      } else if (state === 'failed') {
-        // Definitively broken — try ICE restart with exponential backoff.
-        // Without backoff, repeated 'failed' states (host out of range,
-        // radio off) would spin _restartIce → fail → 'failed' → restart …
-        // forever, burning CPU and spamming offers.
-        this.onPeerState?.(peerId, 'connecting');
-        const delay = Math.min(
+        const backoff = Math.min(
           ICE_RESTART_BASE_MS * 2 ** entry.restartAttempts,
           ICE_RESTART_MAX_MS,
         );
+        // First disconnect with no prior restart attempts: give the link a
+        // grace period to recover on its own before forcing a restart.
+        // Otherwise (failed, or repeated disconnects) honor the backoff.
+        const delay = state === 'disconnected' && entry.restartAttempts === 0
+          ? DISCONNECT_GRACE_MS
+          : backoff;
         this._scheduleIceRestart(entry, delay);
       } else if (state === 'closed') {
         this._clearDisconnectTimer(entry);
@@ -711,8 +738,12 @@ export class WebRTCManager {
     }
   }
 
-  // Public: useIntercom calls this from its own peer_left handler so we don't
-  // clobber whatever else is registered on the signaling handlers object.
+  // Public alias for _removePeer. useIntercom's peer_left handler also clears
+  // the store entry, so it can't compose with our internal handler via the
+  // _bindSignalingHandlers wrapping (which only covers offer/answer/ice).
+  // Keeping this as a public method (rather than letting callers reach into
+  // _removePeer directly) preserves the internal/external boundary if we
+  // ever add bookkeeping that should only run on remote-initiated departure.
   handlePeerLeft(peerId) {
     this._removePeer(peerId);
   }
@@ -724,6 +755,13 @@ export class WebRTCManager {
   // and the rejoiner becomes a silent guest.
   resetPeers() {
     if (this.destroyed) return;
+    // Deliberately preserves localStream and _localStatsPc. On a signaling
+    // reconnect the mic capture is still valid (same AVAudioSession, same
+    // track) — callPeer() in the replayed peer_list adds those existing
+    // tracks to each fresh pc. Nulling localStream here would force a
+    // full mic re-acquisition on every reconnect, which on iOS triggers a
+    // brief audio-route glitch and on Android can race against the
+    // foreground service.
     const ids = Array.from(this.peers.keys());
     ids.forEach((id) => this._removePeer(id));
     this.pendingOffers = [];

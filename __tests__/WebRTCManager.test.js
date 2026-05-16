@@ -33,6 +33,8 @@ function makePc({ signalingState = 'stable' } = {}) {
     onicecandidate: null,
     ontrack: null,
     onconnectionstatechange: null,
+    oniceconnectionstatechange: null,
+    iceConnectionState: 'new',
   };
 }
 
@@ -545,4 +547,99 @@ test('_localStatsPc setup is bounded by MAX_BUILD_ATTEMPTS', async () => {
   // one call per attempt × MAX_BUILD_ATTEMPTS = 3.
   expect(RTCPeerConnection).toHaveBeenCalledTimes(3);
   rtc.destroy();
+});
+
+test('_localStatsPc retry symmetry: single caller retries up to MAX_BUILD_ATTEMPTS', async () => {
+  // Regression guard for the asymmetry: previously the original builder got
+  // exactly one shot while concurrent waiters got retried. A solo caller
+  // hitting a transient native failure must also retry until the cap.
+  // _buildLocalStatsPc catches sync throws and reports non-fatal, leaving
+  // _localStatsPc null — so _ensureLocalStatsPc must self-recurse.
+  RTCPeerConnection.mockImplementation(() => { throw new Error('native broken'); });
+  const signaling = makeSignaling();
+  const rtc = new WebRTCManager(signaling, jest.fn(), jest.fn(), jest.fn(), jest.fn());
+  rtc.localStream = { getTracks: () => [] };
+
+  // ONE call should now exhaust all 3 attempts (was 1 attempt before).
+  await rtc._ensureLocalStatsPc();
+  expect(RTCPeerConnection).toHaveBeenCalledTimes(3);
+  rtc.destroy();
+});
+
+test('iceConnectionState=connected resets restartAttempts even if connectionState lags', async () => {
+  // Some react-native-webrtc builds leave connectionState parked in
+  // 'connecting' even when iceConnectionState reaches 'connected' and
+  // media flows. The ice-level reset must independently clear the
+  // backoff counter so a later flap doesn't keep climbing toward the cap.
+  const pc = makePc();
+  RTCPeerConnection.mockImplementation(() => pc);
+  const signaling = makeSignaling();
+  const rtc = new WebRTCManager(signaling, jest.fn(), jest.fn(), jest.fn(), jest.fn());
+  rtc.setMyId('peer-z');
+  await rtc.callPeer('peer-a');
+  const entry = entryOf(rtc, 'peer-a');
+  entry.restartAttempts = 4;
+
+  pc.iceConnectionState = 'connected';
+  pc.oniceconnectionstatechange();
+  expect(entry.restartAttempts).toBe(0);
+  rtc.destroy();
+});
+
+test('disconnected ↔ failed flap honors shared backoff (does not reset to 5s grace)', async () => {
+  // Regression: a flapping link previously oscillated through 'disconnected'
+  // (fixed 5s timer) and 'failed' (backoff timer), with the disconnected
+  // branch overwriting the timer with 5s every flap — defeating the
+  // exponential backoff. Both branches must now consult restartAttempts.
+  jest.useFakeTimers();
+  const pc = makePc();
+  RTCPeerConnection.mockImplementation(() => pc);
+  const signaling = makeSignaling();
+  const rtc = new WebRTCManager(signaling, jest.fn(), jest.fn(), jest.fn(), jest.fn());
+  rtc.setMyId('peer-z');
+  await rtc.callPeer('peer-a');
+  const entry = entryOf(rtc, 'peer-a');
+
+  // Simulate a few failed restarts so restartAttempts is non-zero.
+  entry.restartAttempts = 3;
+
+  // Now the link flaps back to 'disconnected'. With the bug, this would
+  // re-arm the timer to 5000ms, ignoring the climbing backoff.
+  pc.connectionState = 'disconnected';
+  pc.onconnectionstatechange();
+  expect(entry.disconnectTimer).not.toBeNull();
+
+  // 5s — base disconnect grace — would NOT have fired the restart yet under
+  // backoff (500 * 2^3 = 4000ms), so let's prove it fires earlier than 5s,
+  // i.e. backoff wins over the legacy 5s grace.
+  jest.advanceTimersByTime(4000);
+  expect(entry.disconnectTimer).toBeNull(); // timer fired
+  rtc.destroy();
+  jest.useRealTimers();
+});
+
+test('first disconnected (no prior attempts) uses 5s grace, not zero-delay backoff', async () => {
+  // Counterpart guard: the grace period for a *fresh* disconnect must still
+  // apply so a single brief radio drop doesn't immediately kick a restart.
+  jest.useFakeTimers();
+  const pc = makePc();
+  RTCPeerConnection.mockImplementation(() => pc);
+  const signaling = makeSignaling();
+  const rtc = new WebRTCManager(signaling, jest.fn(), jest.fn(), jest.fn(), jest.fn());
+  rtc.setMyId('peer-z');
+  await rtc.callPeer('peer-a');
+  const entry = entryOf(rtc, 'peer-a');
+  expect(entry.restartAttempts).toBe(0);
+
+  pc.connectionState = 'disconnected';
+  pc.onconnectionstatechange();
+
+  // Backoff would be 500ms; grace is 5000ms. Timer must NOT fire at 1s.
+  jest.advanceTimersByTime(1000);
+  expect(entry.disconnectTimer).not.toBeNull();
+  // …but DOES fire by 5s.
+  jest.advanceTimersByTime(4500);
+  expect(entry.disconnectTimer).toBeNull();
+  rtc.destroy();
+  jest.useRealTimers();
 });
