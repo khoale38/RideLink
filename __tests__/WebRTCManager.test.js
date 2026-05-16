@@ -251,3 +251,24 @@ test('glare: lexicographically larger id is impolite and ignores incoming offer'
   expect(signaling.send).not.toHaveBeenCalled();
   rtc.destroy();
 });
+
+test('impolite glare re-arms offer watchdog so a slow polite-peer answer can still land', async () => {
+  jest.useFakeTimers();
+  const existing = makePc({ signalingState: 'have-local-offer' });
+  RTCPeerConnection.mockImplementation(() => existing);
+  const signaling = makeSignaling();
+  const rtc = new WebRTCManager(signaling, jest.fn(), jest.fn(), jest.fn(), jest.fn());
+  rtc.setMyId('peer-z'); // impolite
+  await rtc.callPeer('peer-b');
+  // Advance most of the way through the original watchdog window.
+  jest.advanceTimersByTime(14000);
+  // Glare arrives — we should re-arm, not let the original timer fire.
+  await rtc._handleOffer({ from: 'peer-b', sdp: { type: 'offer', sdp: 'remote' } });
+  // The original 15s deadline has now passed.
+  jest.advanceTimersByTime(2000);
+  // pc must still be alive — the re-armed watchdog hasn't expired yet.
+  expect(existing.close).not.toHaveBeenCalled();
+  expect(rtc.peers.has('peer-b')).toBe(true);
+  rtc.destroy();
+  jest.useRealTimers();
+});

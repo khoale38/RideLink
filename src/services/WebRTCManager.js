@@ -340,6 +340,14 @@ export class WebRTCManager {
       const polite = this.myId < msg.from;
       if (!polite) {
         if (__DEV__) console.warn('[WebRTC] glare: ignoring offer from', msg.from, 'in', existing.signalingState);
+        // Re-arm the offer watchdog: glare means the polite peer will tear
+        // down their pc and send us an answer to our ORIGINAL local offer.
+        // On slow links that round trip can exceed the initial 15s window —
+        // without this refresh, the watchdog would nuke a healthy in-flight
+        // pc just as the polite peer's answer is on the wire.
+        if (existing.signalingState === 'have-local-offer') {
+          this._armOfferWatchdog(msg.from);
+        }
         return;
       }
       // Polite side: tear down the in-flight local pc and accept the remote
