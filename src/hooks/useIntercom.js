@@ -27,6 +27,12 @@ export function useIntercom(store, { onKicked } = {}) {
   // listener (EADDRINUSE) — the lock makes the second call wait for the
   // first to finish instead of relying on the bind-retry fallback.
   const sessionLockRef = useRef(Promise.resolve());
+  // The lock chains via `.then(fn, fn)` so the next caller runs whether the
+  // previous one fulfilled or rejected — a failed leave/host should not block
+  // a subsequent join. `next` carries the *new* fn's rejection back to the
+  // caller; `sessionLockRef` holds the swallowed-rejection version so the
+  // chain itself never settles to a rejected state and future `.then(fn, fn)`
+  // calls always fire.
   const withSessionLock = (fn) => {
     const next = sessionLockRef.current.then(() => fn(), () => fn());
     sessionLockRef.current = next.catch(() => {});

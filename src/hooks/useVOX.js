@@ -177,6 +177,11 @@ export function useVOX(localStream, enabled = true, localLevelRef = null) {
         // iOS↔Android platform flip on the same JS bundle — could leave
         // `running` true; force-stop here so start() reliably re-arms the
         // native capture rather than no-oping.
+        // Clear the listener BEFORE stopping so an in-flight frame from the
+        // prior session can't fire one last onSample() against the new
+        // session's closures (calibrationActive / thresholdRef captured by
+        // this effect's scope). Then stop the recorder itself.
+        try { Recorder.setListener(null); } catch (_) { /* ignore */ }
         try { Recorder.stop(); } catch (_) { /* ignore */ }
         Recorder.configure({
           sampleRate: SAMPLE_RATE,

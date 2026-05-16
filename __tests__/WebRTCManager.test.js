@@ -21,6 +21,7 @@ function makeSignaling() {
 function makePc({ signalingState = 'stable' } = {}) {
   return {
     signalingState,
+    connectionState: 'new',
     addTrack: jest.fn(),
     createOffer: jest.fn().mockResolvedValue({ type: 'offer', sdp: 'x' }),
     createAnswer: jest.fn().mockResolvedValue({ type: 'answer', sdp: 'y' }),
@@ -34,6 +35,10 @@ function makePc({ signalingState = 'stable' } = {}) {
     onconnectionstatechange: null,
   };
 }
+
+// PeerEntry-aware accessors so test bodies stay readable.
+const pcOf = (rtc, id) => rtc.peers.get(id)?.pc;
+const entryOf = (rtc, id) => rtc.peers.get(id);
 
 beforeEach(() => {
   jest.clearAllMocks();
@@ -114,8 +119,8 @@ test('_restartIce: smaller id stays silent (waits for peer to drive)', async () 
   const signaling = makeSignaling();
   const rtc = new WebRTCManager(signaling, jest.fn(), jest.fn(), jest.fn(), jest.fn());
 
-  // Smaller id should NOT drive restart even after a glare cleared initiatorOf.
-  // This is the regression guard: previously the polite side cleared
+  // Smaller id should NOT drive restart even after a glare cleared the initiator
+  // flag. This is the regression guard: previously the polite side cleared
   // initiatorOf on glare and then no one could restart ICE.
   rtc.setMyId('peer-a');
   await rtc.callPeer('peer-z');
@@ -129,10 +134,6 @@ test('_restartIce: smaller id stays silent (waits for peer to drive)', async () 
 });
 
 test('_handleAnswer: ignores answer when signalingState is not have-local-offer (stale answer should not tear down healthy pc)', async () => {
-  // Reproduce: a late answer arrives after glare resolution swapped our local
-  // offer out. The pc is now 'stable' (or 'have-remote-offer'). Old code
-  // called setRemoteDescription unconditionally → InvalidStateError → pc torn
-  // down. New behavior: log non-fatally, keep the pc.
   const pc = makePc({ signalingState: 'stable' });
   RTCPeerConnection.mockImplementation(() => pc);
   const signaling = makeSignaling();
@@ -146,7 +147,7 @@ test('_handleAnswer: ignores answer when signalingState is not have-local-offer 
 
   expect(pc.setRemoteDescription).not.toHaveBeenCalled();
   expect(pc.close).not.toHaveBeenCalled();
-  expect(rtc.peers.get('peer-b')).toBe(pc);
+  expect(pcOf(rtc, 'peer-b')).toBe(pc);
   // Non-fatal: onError (fatal callback) is NOT invoked.
   expect(onError).not.toHaveBeenCalled();
   rtc.destroy();
@@ -170,9 +171,6 @@ test('pendingOffers dedupes by peer before setMyId', async () => {
 });
 
 test('ICE candidate arriving before remote SDP is buffered and flushed after setRemoteDescription', async () => {
-  // Stand up a pc that reports no remoteDescription until setRemoteDescription
-  // is called. Mirrors the polite-glare path where we tear down and rebuild,
-  // and trickle ICE arrives in the gap before SDP is applied.
   const pc = makePc();
   pc.remoteDescription = null;
   pc.setRemoteDescription = jest.fn(async (sdp) => { pc.remoteDescription = sdp; });
@@ -180,21 +178,17 @@ test('ICE candidate arriving before remote SDP is buffered and flushed after set
   const signaling = makeSignaling();
   const rtc = new WebRTCManager(signaling, jest.fn(), jest.fn(), jest.fn(), jest.fn());
   rtc.setMyId('peer-a');
-  // Seed the pc into the peer map by creating it directly.
   rtc._createPeerConnection('peer-b');
 
-  // Candidate lands BEFORE the offer is handled.
   await rtc._handleIceCandidate({ from: 'peer-b', candidate: { candidate: 'c1', sdpMLineIndex: 0 } });
   expect(pc.addIceCandidate).not.toHaveBeenCalled();
-  expect(rtc.pendingCandidates.get('peer-b')).toHaveLength(1);
+  expect(entryOf(rtc, 'peer-b').pendingCandidates).toHaveLength(1);
 
-  // Now the offer arrives — setRemoteDescription is called, then the
-  // buffered candidate is replayed.
   await rtc._handleOffer({ from: 'peer-b', sdp: { type: 'offer', sdp: 'remote' } });
 
   expect(pc.setRemoteDescription).toHaveBeenCalled();
   expect(pc.addIceCandidate).toHaveBeenCalledTimes(1);
-  expect(rtc.pendingCandidates.has('peer-b')).toBe(false);
+  expect(entryOf(rtc, 'peer-b').pendingCandidates).toHaveLength(0);
   rtc.destroy();
 });
 
@@ -207,10 +201,8 @@ test('offer watchdog tears down a pc that never receives an answer', async () =>
   rtc.setMyId('peer-z');
   await rtc.callPeer('peer-a');
   expect(rtc.peers.has('peer-a')).toBe(true);
-  expect(rtc.offerWatchdogs.has('peer-a')).toBe(true);
+  expect(entryOf(rtc, 'peer-a').offerWatchdog).not.toBeNull();
 
-  // Fast-forward past the watchdog window. The pc is still in
-  // 'have-local-offer' → watchdog fires → peer removed.
   jest.advanceTimersByTime(21000);
   expect(pc.close).toHaveBeenCalled();
   expect(rtc.peers.has('peer-a')).toBe(false);
@@ -228,7 +220,7 @@ test('offer watchdog cleared when answer arrives', async () => {
   await rtc.callPeer('peer-a');
 
   await rtc._handleAnswer({ from: 'peer-a', sdp: { type: 'answer', sdp: 'ok' } });
-  expect(rtc.offerWatchdogs.has('peer-a')).toBe(false);
+  expect(entryOf(rtc, 'peer-a').offerWatchdog).toBeNull();
 
   // Even past the deadline, no teardown happens.
   jest.advanceTimersByTime(20000);
@@ -249,17 +241,12 @@ test('glare: lexicographically larger id is impolite and ignores incoming offer'
 
   await rtc._handleOffer({ from: 'peer-b', sdp: { type: 'offer', sdp: 'remote' } });
 
-  // Impolite side: existing pc untouched, no answer sent.
   expect(existing.close).not.toHaveBeenCalled();
   expect(signaling.send).not.toHaveBeenCalled();
   rtc.destroy();
 });
 
 test('polite-glare rebuild preserves ICE candidates buffered before the new offer arrives', async () => {
-  // Race: candidate from remote arrives → buffered. Then their offer arrives
-  // while we already have a local-offer pc (glare). On the polite path we
-  // tear down and rebuild — the buffered candidates must survive the rebuild
-  // so trickle isn't lost.
   const existing = makePc({ signalingState: 'have-local-offer' });
   const fresh = makePc();
   fresh.remoteDescription = null;
@@ -272,22 +259,18 @@ test('polite-glare rebuild preserves ICE candidates buffered before the new offe
   rtc.setMyId('peer-a'); // polite vs peer-b
   await rtc.callPeer('peer-b');
 
-  // Trickle ICE arrives while we still only have a local offer (no remote
-  // SDP yet) — gets buffered against the existing pc.
   await rtc._handleIceCandidate({ from: 'peer-b', candidate: { candidate: 'c1', sdpMLineIndex: 0 } });
-  expect(rtc.pendingCandidates.get('peer-b')).toHaveLength(1);
+  expect(entryOf(rtc, 'peer-b').pendingCandidates).toHaveLength(1);
 
-  // Now their offer lands — polite path tears down `existing` and rebuilds.
   await rtc._handleOffer({ from: 'peer-b', sdp: { type: 'offer', sdp: 'remote' } });
 
-  // Fresh pc must have had the buffered candidate replayed against it.
   expect(fresh.setRemoteDescription).toHaveBeenCalled();
   expect(fresh.addIceCandidate).toHaveBeenCalledTimes(1);
-  expect(rtc.pendingCandidates.has('peer-b')).toBe(false);
+  expect(entryOf(rtc, 'peer-b').pendingCandidates).toHaveLength(0);
   rtc.destroy();
 });
 
-test('_handleAnswer clears watchdog when negotiation already settled to stable', async () => {
+test('_handleAnswer clears watchdog when negotiation already settled (stale state)', async () => {
   jest.useFakeTimers();
   const pc = makePc({ signalingState: 'stable' });
   RTCPeerConnection.mockImplementation(() => pc);
@@ -295,18 +278,37 @@ test('_handleAnswer clears watchdog when negotiation already settled to stable',
   const rtc = new WebRTCManager(signaling, jest.fn(), jest.fn(), jest.fn(), jest.fn());
   rtc.setMyId('peer-z');
   await rtc.callPeer('peer-a');
-  // Watchdog is armed by callPeer; pc is now (artificially) stable, simulating
-  // that another path already converged the negotiation.
-  expect(rtc.offerWatchdogs.has('peer-a')).toBe(true);
+  expect(entryOf(rtc, 'peer-a').offerWatchdog).not.toBeNull();
 
   await rtc._handleAnswer({ from: 'peer-a', sdp: { type: 'answer', sdp: 'late' } });
 
-  // Stale-state path must have cleared the watchdog — otherwise it would
-  // later fire and tear down a healthy pc.
-  expect(rtc.offerWatchdogs.has('peer-a')).toBe(false);
+  expect(entryOf(rtc, 'peer-a').offerWatchdog).toBeNull();
   jest.advanceTimersByTime(30000);
   expect(pc.close).not.toHaveBeenCalled();
   expect(rtc.peers.has('peer-a')).toBe(true);
+  rtc.destroy();
+  jest.useRealTimers();
+});
+
+test('_handleAnswer clears watchdog even when pc is in have-remote-offer (stale-state regression)', async () => {
+  // Bug: prior code only cleared the watchdog when state was 'stable'. If a
+  // late answer arrived while the pc was in 'have-remote-offer' or one of the
+  // 'have-*-pranswer' states, the watchdog stayed armed and later tore down
+  // a healthy pc when the deadline fired.
+  jest.useFakeTimers();
+  const pc = makePc({ signalingState: 'have-remote-offer' });
+  RTCPeerConnection.mockImplementation(() => pc);
+  const signaling = makeSignaling();
+  const rtc = new WebRTCManager(signaling, jest.fn(), jest.fn(), jest.fn(), jest.fn());
+  rtc.setMyId('peer-z');
+  await rtc.callPeer('peer-a');
+  expect(entryOf(rtc, 'peer-a').offerWatchdog).not.toBeNull();
+
+  await rtc._handleAnswer({ from: 'peer-a', sdp: { type: 'answer', sdp: 'late' } });
+  expect(entryOf(rtc, 'peer-a').offerWatchdog).toBeNull();
+
+  jest.advanceTimersByTime(30000);
+  expect(pc.close).not.toHaveBeenCalled();
   rtc.destroy();
   jest.useRealTimers();
 });
@@ -319,15 +321,228 @@ test('impolite glare re-arms offer watchdog so a slow polite-peer answer can sti
   const rtc = new WebRTCManager(signaling, jest.fn(), jest.fn(), jest.fn(), jest.fn());
   rtc.setMyId('peer-z'); // impolite
   await rtc.callPeer('peer-b');
-  // Advance most of the way through the original watchdog window.
   jest.advanceTimersByTime(14000);
-  // Glare arrives — we should re-arm, not let the original timer fire.
   await rtc._handleOffer({ from: 'peer-b', sdp: { type: 'offer', sdp: 'remote' } });
-  // The original 15s deadline has now passed.
   jest.advanceTimersByTime(2000);
-  // pc must still be alive — the re-armed watchdog hasn't expired yet.
   expect(existing.close).not.toHaveBeenCalled();
   expect(rtc.peers.has('peer-b')).toBe(true);
   rtc.destroy();
   jest.useRealTimers();
+});
+
+test('callPeer does NOT set initiator flag when send is skipped by identity guard', async () => {
+  // Regression: prior code did `initiatorOf.add(peerId)` before the await chain,
+  // so a teardown mid-await left initiator state dangling. Now `entry.initiator`
+  // is only set after the offer actually goes out.
+  const pc = makePc();
+  // Make setLocalDescription a pending promise we control, so we can remove the
+  // peer mid-flight and observe the identity guard returning before send.
+  let resolveSetLocal;
+  pc.setLocalDescription = jest.fn(() => new Promise((r) => { resolveSetLocal = r; }));
+  RTCPeerConnection.mockImplementation(() => pc);
+  const signaling = makeSignaling();
+  const rtc = new WebRTCManager(signaling, jest.fn(), jest.fn(), jest.fn(), jest.fn());
+  rtc.setMyId('peer-z');
+
+  const callPromise = rtc.callPeer('peer-a');
+  // Wait for the await chain to reach setLocalDescription so resolveSetLocal
+  // is wired up before we tear down.
+  await new Promise((r) => setImmediate(r));
+  // Peer is now in the map and the await is suspended — tear down.
+  rtc._removePeer('peer-a');
+  resolveSetLocal();
+  await callPromise;
+
+  expect(signaling.send).not.toHaveBeenCalled();
+  // Peer is gone — no dangling state to inspect, but most importantly no offer
+  // was sent and no watchdog was armed against an evicted entry.
+  expect(rtc.peers.has('peer-a')).toBe(false);
+  rtc.destroy();
+});
+
+test('_removePeer clears the offer watchdog so it cannot fire later', async () => {
+  // Guards the bug fixed in 66e925a (resetPeers / _removePeer must flush
+  // watchdogs, otherwise a stray timer tears down a freshly rebuilt pc).
+  jest.useFakeTimers();
+  const pc = makePc({ signalingState: 'have-local-offer' });
+  RTCPeerConnection.mockImplementation(() => pc);
+  const signaling = makeSignaling();
+  const rtc = new WebRTCManager(signaling, jest.fn(), jest.fn(), jest.fn(), jest.fn());
+  rtc.setMyId('peer-z');
+  await rtc.callPeer('peer-a');
+  rtc._removePeer('peer-a');
+  expect(pc.close).toHaveBeenCalled();
+  pc.close.mockClear();
+  // The freed timer must not fire against a stale entry.
+  jest.advanceTimersByTime(30000);
+  expect(pc.close).not.toHaveBeenCalled();
+  rtc.destroy();
+  jest.useRealTimers();
+});
+
+test('resetPeers clears all watchdogs and disconnect timers', async () => {
+  jest.useFakeTimers();
+  const pcA = makePc({ signalingState: 'have-local-offer' });
+  const pcB = makePc({ signalingState: 'have-local-offer' });
+  RTCPeerConnection.mockImplementationOnce(() => pcA).mockImplementationOnce(() => pcB);
+  const signaling = makeSignaling();
+  const rtc = new WebRTCManager(signaling, jest.fn(), jest.fn(), jest.fn(), jest.fn());
+  rtc.setMyId('peer-z');
+  await rtc.callPeer('peer-a');
+  await rtc.callPeer('peer-b');
+
+  rtc.resetPeers();
+  expect(rtc.peers.size).toBe(0);
+  expect(rtc.pendingOffers).toHaveLength(0);
+  expect(rtc.myId).toBeNull();
+
+  pcA.close.mockClear();
+  pcB.close.mockClear();
+  jest.advanceTimersByTime(30000);
+  expect(pcA.close).not.toHaveBeenCalled();
+  expect(pcB.close).not.toHaveBeenCalled();
+  rtc.destroy();
+  jest.useRealTimers();
+});
+
+test('trailing onicecandidate after _removePeer does not get relayed', async () => {
+  const pc = makePc();
+  RTCPeerConnection.mockImplementation(() => pc);
+  const signaling = makeSignaling();
+  const rtc = new WebRTCManager(signaling, jest.fn(), jest.fn(), jest.fn(), jest.fn());
+  rtc.setMyId('peer-z');
+  await rtc.callPeer('peer-a');
+  const onIce = pc.onicecandidate;
+
+  rtc._removePeer('peer-a');
+  signaling.send.mockClear();
+  // Native side flushes a trailing candidate after close — must be dropped.
+  onIce({ candidate: { candidate: 'trailing', sdpMLineIndex: 0 } });
+  expect(signaling.send).not.toHaveBeenCalled();
+  rtc.destroy();
+});
+
+test('_handleOffer identity guard: rebuild during awaits does not send a stale answer', async () => {
+  // Polite-glare-during-glare race: while we're answering peer-b, _removePeer
+  // wipes the entry. The in-flight await chain must bail at the identity guard
+  // before sending an answer for an entry that's no longer in the map.
+  let resolveSetRemote;
+  const pc = makePc();
+  pc.setRemoteDescription = jest.fn(() => new Promise((r) => { resolveSetRemote = r; }));
+  RTCPeerConnection.mockImplementation(() => pc);
+  const signaling = makeSignaling();
+  const rtc = new WebRTCManager(signaling, jest.fn(), jest.fn(), jest.fn(), jest.fn());
+  rtc.setMyId('peer-z');
+
+  const offerPromise = rtc._handleOffer({ from: 'peer-a', sdp: { type: 'offer', sdp: 'x' } });
+  // Let _handleOffer enter the await on setRemoteDescription before we tear down.
+  await new Promise((r) => setImmediate(r));
+  // Mid-await: someone tears the peer down.
+  rtc._removePeer('peer-a');
+  resolveSetRemote();
+  await offerPromise;
+
+  expect(signaling.send).not.toHaveBeenCalled();
+  rtc.destroy();
+});
+
+test('ICE-restart backoff: repeated `failed` does not spin without delay', async () => {
+  jest.useFakeTimers();
+  const pc = makePc({ signalingState: 'stable' });
+  pc.connectionState = 'new';
+  RTCPeerConnection.mockImplementation(() => pc);
+  const signaling = makeSignaling();
+  const rtc = new WebRTCManager(signaling, jest.fn(), jest.fn(), jest.fn(), jest.fn());
+  rtc.setMyId('peer-z');
+  await rtc.callPeer('peer-a');
+  const onState = pc.onconnectionstatechange;
+
+  // First 'failed' — restart should schedule with the BASE delay, not 0.
+  pc.connectionState = 'failed';
+  onState();
+  // Less than base delay: timer hasn't fired yet.
+  jest.advanceTimersByTime(100);
+  // Inspect timer presence via the entry (we don't directly check createOffer
+  // here because callPeer already called it once).
+  expect(rtc.peers.get('peer-a').disconnectTimer).not.toBeNull();
+  rtc.destroy();
+  jest.useRealTimers();
+});
+
+test('ICE-restart gives up after MAX_ATTEMPTS', async () => {
+  const pc = makePc({ signalingState: 'stable' });
+  RTCPeerConnection.mockImplementation(() => pc);
+  const signaling = makeSignaling();
+  const rtc = new WebRTCManager(signaling, jest.fn(), jest.fn(), jest.fn(), jest.fn());
+  rtc.setMyId('peer-z');
+  await rtc.callPeer('peer-a');
+  // Force the entry past the cap.
+  rtc.peers.get('peer-a').restartAttempts = 6;
+  pc.close.mockClear();
+  await rtc._restartIce('peer-a');
+  expect(pc.close).toHaveBeenCalled();
+  expect(rtc.peers.has('peer-a')).toBe(false);
+  rtc.destroy();
+});
+
+test('reconnect flow: resetPeers wipes state then peer_list replay produces fresh offers', async () => {
+  // End-to-end reconnect simulation: an established peer drops on signaling
+  // reconnect; resetPeers + setMyId(new id) + callPeer for each replayed peer
+  // should mint a brand new pc and offer with no leftover state from the old
+  // session. This is the single most fragile path in production.
+  const pcOld = makePc();
+  const pcNew = makePc();
+  RTCPeerConnection
+    .mockImplementationOnce(() => pcOld)
+    .mockImplementationOnce(() => pcNew);
+  const signaling = makeSignaling();
+  const rtc = new WebRTCManager(signaling, jest.fn(), jest.fn(), jest.fn(), jest.fn());
+
+  rtc.setMyId('peer-z');
+  await rtc.callPeer('peer-a');
+  expect(signaling.send).toHaveBeenCalledTimes(1); // first offer
+  expect(rtc.peers.size).toBe(1);
+
+  // Signaling reconnect path: hook calls resetPeers before the new peer_list
+  // arrives. Everything must be flushed including myId so the next setMyId
+  // re-establishes ordering.
+  rtc.resetPeers();
+  expect(rtc.peers.size).toBe(0);
+  expect(rtc.myId).toBeNull();
+  expect(rtc.pendingOffers).toHaveLength(0);
+  // The old pc must have been closed so it doesn't keep relaying stats / ICE.
+  expect(pcOld.close).toHaveBeenCalled();
+
+  // New peer_list arrives with a freshly-issued clientId.
+  signaling.send.mockClear();
+  rtc.setMyId('peer-new');
+  await rtc.callPeer('peer-a');
+
+  // Fresh pc, fresh offer.
+  expect(pcOf(rtc, 'peer-a')).toBe(pcNew);
+  expect(pcNew.createOffer).toHaveBeenCalled();
+  expect(signaling.send).toHaveBeenCalledWith(
+    expect.objectContaining({ type: 'offer', to: 'peer-a' }),
+  );
+  rtc.destroy();
+});
+
+test('_localStatsPc setup is bounded by MAX_BUILD_ATTEMPTS', async () => {
+  // Constructor throws → _buildLocalStatsPc fails → _ensureLocalStatsPc retries.
+  // After 3 failed attempts it must stop calling the constructor.
+  RTCPeerConnection.mockImplementation(() => { throw new Error('native broken'); });
+  const signaling = makeSignaling();
+  const rtc = new WebRTCManager(signaling, jest.fn(), jest.fn(), jest.fn(), jest.fn());
+  rtc.localStream = { getTracks: () => [] }; // bypass startLocalAudio
+
+  await rtc._ensureLocalStatsPc();
+  await rtc._ensureLocalStatsPc();
+  await rtc._ensureLocalStatsPc();
+  await rtc._ensureLocalStatsPc(); // should no-op
+  await rtc._ensureLocalStatsPc(); // should no-op
+
+  // First pc constructor throws → second is never reached this build, so
+  // one call per attempt × MAX_BUILD_ATTEMPTS = 3.
+  expect(RTCPeerConnection).toHaveBeenCalledTimes(3);
+  rtc.destroy();
 });

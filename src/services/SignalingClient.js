@@ -33,6 +33,11 @@ export class SignalingClient {
     this.connected = false;
     this.everConnected = false;       // gate reconnect attempts on first success
     this.intentionallyClosed = false; // set by disconnect() to stop reconnects
+    // Latched true when the reconnect ladder runs out — semantically distinct
+    // from intentionallyClosed (user-driven disconnect). Both gate the
+    // _scheduleReconnect short-circuit, but reusing intentionallyClosed for
+    // gave-up made "why didn't we keep trying?" indistinguishable in logs.
+    this.gaveUp = false;
     this.joinPayload = null;          // last 'join' message, replayed on reconnect
     this.reconnectTimer = null;
     this.reconnectAttempt = 0;
@@ -44,6 +49,7 @@ export class SignalingClient {
     // attempt counter. Without this, the next failure would immediately
     // re-fire gave_up because the counter is still at MAX.
     this.intentionallyClosed = false;
+    this.gaveUp = false;
     this.reconnectAttempt = 0;
     if (this.reconnectTimer) {
       clearTimeout(this.reconnectTimer);
@@ -170,13 +176,13 @@ export class SignalingClient {
   }
 
   _scheduleReconnect() {
-    if (this.intentionallyClosed) return;
+    if (this.intentionallyClosed || this.gaveUp) return;
     if (!this.everConnected) return;        // initial connect failed → let caller decide
     if (this.reconnectTimer) return;        // already scheduled
 
     if (this.reconnectAttempt >= MAX_RECONNECT_ATTEMPTS) {
       // Stop trying — host is almost certainly gone. UI gives up gracefully.
-      this.intentionallyClosed = true;
+      this.gaveUp = true;
       this.handlers.gave_up?.();
       return;
     }
@@ -188,7 +194,7 @@ export class SignalingClient {
 
     this.reconnectTimer = setTimeout(() => {
       this.reconnectTimer = null;
-      if (this.intentionallyClosed) return;
+      if (this.intentionallyClosed || this.gaveUp) return;
       this._openSocket().catch(() => {
         // _openSocket's error handler already schedules the next attempt
       });

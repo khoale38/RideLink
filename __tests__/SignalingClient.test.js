@@ -77,11 +77,13 @@ test('connect() after gave_up resets reconnect counter so the instance is reusab
   // Re-run private; jest can reach because methods are plain class methods.
   client._scheduleReconnect();
   expect(handlers.gave_up).toHaveBeenCalled();
-  expect(client.intentionallyClosed).toBe(true);
+  expect(client.gaveUp).toBe(true);
+  expect(client.intentionallyClosed).toBe(false);
 
   // Now caller invokes connect() again — must clear the latch and reset
   // the attempt counter, otherwise the next failure re-fires gave_up.
   await client.connect();
+  expect(client.gaveUp).toBe(false);
   expect(client.intentionallyClosed).toBe(false);
   expect(client.reconnectAttempt).toBe(0);
 });

@@ -151,19 +151,28 @@ export function stopSignalingServer() {
   // un-flushed data, which left guests bouncing through "reconnecting →
   // gave_up" with a "Lost connection" alert instead of the intended
   // "Host closed the group" notice.
+  // Two-pass: snapshot the joined sockets first so a re-entrant cleanup
+  // (e.g. a socket 'error' firing _cleanupClient mid-shutdown) can't mutate
+  // the map while we iterate. Map entries are cleared after — sockets
+  // outlive the entry since the platform keeps them alive until close
+  // completes, so the queued room_closed payload still flushes.
+  const joinedSockets = [];
   clients.forEach((entry) => {
     clearTimeout(entry.joinTimer);
     if (entry.isHost || !entry.joined) {
       try { entry.socket.destroy(); } catch (_) { /* ignore */ }
       return;
     }
-    try {
-      entry.socket.end(JSON.stringify({ type: 'room_closed' }) + '\n');
-    } catch (_) {
-      try { entry.socket.destroy(); } catch (_e) { /* ignore */ }
-    }
+    joinedSockets.push(entry.socket);
   });
   clients.clear();
+  joinedSockets.forEach((sock) => {
+    try {
+      sock.end(JSON.stringify({ type: 'room_closed' }) + '\n');
+    } catch (_) {
+      try { sock.destroy(); } catch (_e) { /* ignore */ }
+    }
+  });
   // Wait for the listener to actually release the port. Without this an
   // immediate re-host (leaveGroup → hostGroup) can race against the FIN
   // teardown and trip EADDRINUSE on the next listen().

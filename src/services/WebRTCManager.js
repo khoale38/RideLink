@@ -2,6 +2,11 @@
  * Manages WebRTC peer connections for group voice chat.
  * One PeerConnection per remote rider.
  * Uses local-only ICE (no STUN/TURN) since all peers are on the same hotspot LAN.
+ *
+ * State model: every peer has exactly one PeerEntry in `this.peers`. The entry
+ * owns its pc, timers, watchdog, ICE-candidate buffer, and restart counter —
+ * so teardown is a single map delete and identity checks reduce to
+ * `_isFresh(id, entry)` rather than tracking pcs across multiple parallel maps.
  */
 import {
   RTCPeerConnection,
@@ -22,6 +27,37 @@ const RTC_CONFIG = {
 // watchdog tears them down faster than the new socket can carry the answer.
 const OFFER_WATCHDOG_MS = 20000;
 
+// ICE-restart backoff. 'failed' connectionState used to schedule a restart with
+// delay 0 unconditionally — under a persistent network problem (host moved out
+// of range, radio off) that looped forever, spamming offers and burning CPU.
+const ICE_RESTART_BASE_MS = 500;
+const ICE_RESTART_MAX_MS = 30000;
+const ICE_RESTART_MAX_ATTEMPTS = 6;
+
+// Bound the per-peer ICE buffer. Stale-epoch candidates after a polite-glare
+// rebuild are rejected non-fatally at flush time, so the worst case here is a
+// few benign warnings rather than a torn-down connection.
+const MAX_PENDING_CANDIDATES = 64;
+
+// Per-peer state. One instance per (peerId, pc) lifetime — replaced wholesale
+// on glare-rebuild rather than mutated in place, so any in-flight operation
+// that captured the old entry can bail by checking `entry.closed` or by
+// comparing identity against `this.peers.get(id)`.
+class PeerEntry {
+  constructor(id, pc) {
+    this.id = id;
+    this.pc = pc;
+    this.closed = false;
+    this.initiator = false; // set true only AFTER we actually sent an offer
+    this.disconnectTimer = null;
+    this.offerWatchdog = null;
+    this.pendingCandidates = [];
+    this.speaking = false;
+    this.restartAttempts = 0;
+    this.candidateOverflowWarned = false;
+  }
+}
+
 export class WebRTCManager {
   constructor(signalingClient, onVoiceActivity, onError, onPeerState, onLocalVoiceActivity, onLocalAudioLevel) {
     this.signaling = signalingClient;
@@ -33,34 +69,27 @@ export class WebRTCManager {
     this.onLocalAudioLevel = onLocalAudioLevel;
     this.onError = onError;
     this.onPeerState = onPeerState; // (peerId, state) — 'connecting' | 'connected' | 'failed'
-    this.peers = new Map(); // peerId -> RTCPeerConnection
-    this.initiatorOf = new Set(); // peer ids where WE created the original offer
-    this.disconnectTimers = new Map(); // peerId -> Timeout for ICE-restart grace
-    // peerId -> Timeout that fires if our local offer never gets an answer.
-    // Guards the impolite-glare deadlock where we ignored the polite peer's
-    // offer and their answer to ours never arrived (they tore down their pc),
-    // leaving signalingState stuck in 'have-local-offer' indefinitely.
-    this.offerWatchdogs = new Map();
+    this.peers = new Map(); // peerId -> PeerEntry
     this.localStream = null;
     this.destroyed = false;
     this.myId = null; // set by setMyId() — used for polite-peer tie-break on glare
 
-    this.speakingState = new Map(); // peerId -> bool (last reported)
     this.localSpeaking = false;
     this.speakingPoll = null;
     // Offers that arrived before setMyId() — replayed once we know our id so
     // the glare tie-break in _handleOffer is symmetric on both peers.
     this.pendingOffers = [];
-    // peerId -> [candidate, ...]. ICE candidates that arrived before the
-    // pc had a remote description applied (the gap between
-    // _createPeerConnection and setRemoteDescription, especially on the
-    // polite-glare path where we tear down and rebuild). Without buffering,
-    // these throw InvalidStateError on addIceCandidate and the trickle is
-    // lost, delaying connect by seconds on slow links.
-    this.pendingCandidates = new Map();
 
     this._bindSignalingHandlers();
     this._startSpeakingPoll();
+  }
+
+  // True iff `entry` is still the current entry for `id`. Replaces the
+  // copy-pasted `this.peers.get(id) !== pc` checks that used to live inline
+  // after every await. Any operation that started against an old entry (e.g.
+  // before a polite-glare rebuild) should bail by calling this between awaits.
+  _isFresh(id, entry) {
+    return !this.destroyed && !entry.closed && this.peers.get(id) === entry;
   }
 
   // Poll inbound-rtp audio stats every ~300ms to detect when a remote rider is
@@ -95,10 +124,11 @@ export class WebRTCManager {
           });
         } catch (_) { /* getStats can throw mid-teardown; ignore */ }
       }
-      for (const [peerId, pc] of this.peers) {
+      for (const [peerId, entry] of this.peers) {
         try {
-          const stats = await pc.getStats();
+          const stats = await entry.pc.getStats();
           if (this.destroyed) return;
+          if (entry.closed) continue;
           let remoteLevel = 0;
           stats.forEach((report) => {
             const isAudio = report.kind === 'audio' || report.mediaType === 'audio';
@@ -112,8 +142,8 @@ export class WebRTCManager {
             }
           });
           const speaking = remoteLevel >= SPEAKING_THRESHOLD;
-          if (this.speakingState.get(peerId) !== speaking) {
-            this.speakingState.set(peerId, speaking);
+          if (entry.speaking !== speaking) {
+            entry.speaking = speaking;
             this.onVoiceActivity?.(peerId, speaking);
           }
         } catch (_) { /* getStats can throw mid-teardown; ignore */ }
@@ -139,7 +169,6 @@ export class WebRTCManager {
       clearTimeout(this.speakingPoll);
       this.speakingPoll = null;
     }
-    this.speakingState.clear();
   }
 
   // Called by useIntercom after the signaling server replies with our id.
@@ -220,9 +249,15 @@ export class WebRTCManager {
   }
 
   async _buildLocalStatsPc() {
-    const pc = new RTCPeerConnection(RTC_CONFIG);
-    const pcRemote = new RTCPeerConnection(RTC_CONFIG);
+    let pc;
+    let pcRemote;
     try {
+      // Construct inside the try so a synchronously-throwing native
+      // RTCPeerConnection constructor (broken native module, unsupported
+      // platform) routes through _reportError as non-fatal instead of
+      // escaping awaiters of _ensureLocalStatsPc.
+      pc = new RTCPeerConnection(RTC_CONFIG);
+      pcRemote = new RTCPeerConnection(RTC_CONFIG);
       // Surface loopback ICE errors as non-fatal so a broken handshake doesn't
       // silently leave _localStatsPc unset (solo-host speaking indicator dead).
       pc.addEventListener?.('icecandidate', (e) => {
@@ -282,8 +317,8 @@ export class WebRTCManager {
       this._localStatsPc = pc;
       this._localStatsPcRemote = pcRemote;
     } catch (err) {
-      try { pc.close(); } catch (_) { /* ignore */ }
-      try { pcRemote.close(); } catch (_) { /* ignore */ }
+      try { pc?.close(); } catch (_) { /* ignore */ }
+      try { pcRemote?.close(); } catch (_) { /* ignore */ }
       this._reportError('localStatsPc', err, null, /* fatal */ false);
     }
   }
@@ -294,21 +329,24 @@ export class WebRTCManager {
     // duplicate offers on signaling reconnect when peer_list is replayed.
     if (this.peers.has(peerId)) return;
 
-    const pc = this._createPeerConnection(peerId);
-    if (!pc) return;
-    this.initiatorOf.add(peerId);
+    const entry = this._createPeerConnection(peerId);
+    if (!entry) return;
     try {
-      this.localStream?.getTracks().forEach((t) => pc.addTrack(t, this.localStream));
-      const offer = await pc.createOffer();
-      if (this.destroyed) return;
-      await pc.setLocalDescription(offer);
+      this.localStream?.getTracks().forEach((t) => entry.pc.addTrack(t, this.localStream));
+      const offer = await entry.pc.createOffer();
+      if (!this._isFresh(peerId, entry)) return;
+      await entry.pc.setLocalDescription(offer);
       // Identity check: between the awaits above, _removePeer (teardown,
-      // peer_left, glare rebuild) may have replaced or dropped this pc. Don't
-      // send a stale offer or arm a watchdog against an instance no longer in
-      // the map — mirrors the guard in onicecandidate.
-      if (this.peers.get(peerId) !== pc) return;
+      // peer_left, glare rebuild) may have replaced or dropped this entry.
+      // Don't send a stale offer or arm a watchdog against an entry no longer
+      // in the map — mirrors the guard in onicecandidate.
+      if (!this._isFresh(peerId, entry)) return;
       this.signaling.send({ type: 'offer', to: peerId, sdp: offer });
-      this._armOfferWatchdog(peerId);
+      // Only mark as initiator AFTER we actually sent the offer. Setting it
+      // up-front (the prior bug) left `initiator` dangling on entries that
+      // bailed at the identity guard — harmless today, but a footgun.
+      entry.initiator = true;
+      this._armOfferWatchdog(entry);
     } catch (err) {
       this._reportError('callPeer', err, peerId);
       this._removePeer(peerId);
@@ -325,49 +363,59 @@ export class WebRTCManager {
   // only guarded the caller side ('have-local-offer'); broadened to also
   // catch the answerer side ('have-remote-offer' from a partial/stalled
   // remote SDP) so neither role can wedge indefinitely.
-  _armOfferWatchdog(peerId) {
-    this._clearOfferWatchdog(peerId);
-    const t = setTimeout(() => {
-      this.offerWatchdogs.delete(peerId);
-      const pc = this.peers.get(peerId);
-      if (!pc || this.destroyed) return;
-      const s = pc.signalingState;
+  _armOfferWatchdog(entry) {
+    this._clearOfferWatchdog(entry);
+    const peerId = entry.id;
+    entry.offerWatchdog = setTimeout(() => {
+      entry.offerWatchdog = null;
+      if (!this._isFresh(peerId, entry)) return;
+      const s = entry.pc.signalingState;
       if (s === 'stable' || s === 'closed') return; // handshake completed
       if (__DEV__) console.warn('[WebRTC] negotiation watchdog: tearing down stuck pc for', peerId, 'in', s);
       this._reportError('offerWatchdog', new Error(`negotiation stalled in ${s}, tearing down`), peerId, /* fatal */ false);
       this._removePeer(peerId);
     }, OFFER_WATCHDOG_MS);
-    this.offerWatchdogs.set(peerId, t);
   }
 
-  _clearOfferWatchdog(peerId) {
-    const t = this.offerWatchdogs.get(peerId);
-    if (t) {
-      clearTimeout(t);
-      this.offerWatchdogs.delete(peerId);
+  _clearOfferWatchdog(entry) {
+    if (entry.offerWatchdog) {
+      clearTimeout(entry.offerWatchdog);
+      entry.offerWatchdog = null;
     }
   }
 
   // ICE restart — deterministically elected by id comparison so exactly one
   // side drives the restart regardless of who originally initiated. The
   // larger id (impolite side, matches glare tie-break) sends the new offer.
-  // This avoids relying on `initiatorOf`, which is cleared on the polite
-  // side after glare resolution and would otherwise leave a peer with no
-  // one willing to restart it.
+  // This avoids relying on `initiator`, which is cleared on the polite side
+  // after glare resolution and would otherwise leave a peer with no one
+  // willing to restart it.
   async _restartIce(peerId) {
-    const pc = this.peers.get(peerId);
-    if (!pc || this.destroyed) return;
+    const entry = this.peers.get(peerId);
+    if (!entry || this.destroyed) return;
     if (!this.myId || this.myId < peerId) return;
+    if (entry.restartAttempts >= ICE_RESTART_MAX_ATTEMPTS) {
+      // Persistent failure — stop spinning. Tear down so peer_left / a future
+      // peer_list replay can re-elect a fresh negotiation if the link
+      // recovers. Without this cap, repeated 'failed' states would re-fire
+      // _restartIce indefinitely, spamming offers and burning CPU.
+      this._reportError('restartIce.giveUp',
+        new Error(`ICE restart gave up after ${entry.restartAttempts} attempts`),
+        peerId, /* fatal */ false);
+      this._removePeer(peerId);
+      return;
+    }
+    entry.restartAttempts += 1;
     try {
-      if (__DEV__) console.warn('[WebRTC] restarting ICE for', peerId);
-      const offer = await pc.createOffer({ iceRestart: true });
-      if (this.destroyed) return;
-      await pc.setLocalDescription(offer);
+      if (__DEV__) console.warn('[WebRTC] restarting ICE for', peerId, `(attempt ${entry.restartAttempts})`);
+      const offer = await entry.pc.createOffer({ iceRestart: true });
+      if (!this._isFresh(peerId, entry)) return;
+      await entry.pc.setLocalDescription(offer);
       // Same identity guard as callPeer: a teardown or glare-rebuild during
-      // the awaits could have replaced this pc; don't push a stale offer.
-      if (this.peers.get(peerId) !== pc) return;
+      // the awaits could have replaced this entry; don't push a stale offer.
+      if (!this._isFresh(peerId, entry)) return;
       this.signaling.send({ type: 'offer', to: peerId, sdp: offer });
-      this._armOfferWatchdog(peerId);
+      this._armOfferWatchdog(entry);
       this.onPeerState?.(peerId, 'connecting');
     } catch (err) {
       this._reportError('restartIce', err, peerId, /* fatal */ false);
@@ -401,17 +449,17 @@ export class WebRTCManager {
     // is classic glare, but 'have-remote-offer' / 'have-local-pranswer' /
     // 'have-remote-pranswer' (ICE-restart races) need the same handling.
     const existing = this.peers.get(msg.from);
-    if (existing && existing.signalingState && existing.signalingState !== 'stable') {
+    if (existing && existing.pc.signalingState && existing.pc.signalingState !== 'stable') {
       const polite = this.myId < msg.from;
       if (!polite) {
-        if (__DEV__) console.warn('[WebRTC] glare: ignoring offer from', msg.from, 'in', existing.signalingState);
+        if (__DEV__) console.warn('[WebRTC] glare: ignoring offer from', msg.from, 'in', existing.pc.signalingState);
         // Re-arm the offer watchdog: glare means the polite peer will tear
         // down their pc and send us an answer to our ORIGINAL local offer.
         // On slow links that round trip can exceed the initial 15s window —
         // without this refresh, the watchdog would nuke a healthy in-flight
         // pc just as the polite peer's answer is on the wire.
-        if (existing.signalingState === 'have-local-offer') {
-          this._armOfferWatchdog(msg.from);
+        if (existing.pc.signalingState === 'have-local-offer') {
+          this._armOfferWatchdog(existing);
         }
         return;
       }
@@ -429,34 +477,40 @@ export class WebRTCManager {
       // we stand up the new pc. Candidates with stale ufrag from a prior
       // session will be rejected by the WebRTC stack on flush (logged
       // non-fatally), so the worst case is a few harmless warnings.
-      const preservedCandidates = this.pendingCandidates.get(msg.from);
+      const preservedCandidates = existing.pendingCandidates;
       this._removePeer(msg.from);
-      if (preservedCandidates && preservedCandidates.length) {
-        this.pendingCandidates.set(msg.from, preservedCandidates);
+      if (preservedCandidates.length) {
+        // Re-seed the buffer on the new entry below by stashing on `msg`
+        // briefly — but the new entry doesn't exist yet, so hold via a local.
+        msg.__preservedCandidates = preservedCandidates;
       }
     }
 
-    const pc = this._createPeerConnection(msg.from);
-    if (!pc) return;
+    const entry = this._createPeerConnection(msg.from);
+    if (!entry) return;
+    if (msg.__preservedCandidates) {
+      entry.pendingCandidates = msg.__preservedCandidates;
+      delete msg.__preservedCandidates;
+    }
     // Arm the negotiation watchdog before any awaits — covers the answerer
     // side, so a stall in setRemoteDescription/createAnswer/setLocalDescription
     // can't leave the pc parked in 'have-remote-offer' forever.
-    this._armOfferWatchdog(msg.from);
+    this._armOfferWatchdog(entry);
     try {
-      this.localStream?.getTracks().forEach((t) => pc.addTrack(t, this.localStream));
-      await pc.setRemoteDescription(new RTCSessionDescription(msg.sdp));
+      this.localStream?.getTracks().forEach((t) => entry.pc.addTrack(t, this.localStream));
+      await entry.pc.setRemoteDescription(new RTCSessionDescription(msg.sdp));
       // Identity guard: a glare-rebuild or _removePeer during the awaits may
-      // have swapped or evicted this pc. Mirrors the guards in callPeer /
+      // have swapped or evicted this entry. Mirrors the guards in callPeer /
       // _restartIce so we never push an answer for an orphaned pc.
-      if (this.destroyed || this.peers.get(msg.from) !== pc) return;
-      await this._flushPendingCandidates(msg.from);
-      if (this.destroyed || this.peers.get(msg.from) !== pc) return;
-      const answer = await pc.createAnswer();
-      if (this.destroyed || this.peers.get(msg.from) !== pc) return;
-      await pc.setLocalDescription(answer);
-      if (this.destroyed || this.peers.get(msg.from) !== pc) return;
+      if (!this._isFresh(msg.from, entry)) return;
+      await this._flushPendingCandidates(entry);
+      if (!this._isFresh(msg.from, entry)) return;
+      const answer = await entry.pc.createAnswer();
+      if (!this._isFresh(msg.from, entry)) return;
+      await entry.pc.setLocalDescription(answer);
+      if (!this._isFresh(msg.from, entry)) return;
       this.signaling.send({ type: 'answer', to: msg.from, sdp: answer });
-      this._clearOfferWatchdog(msg.from); // handshake done from our side
+      this._clearOfferWatchdog(entry); // handshake done from our side
     } catch (err) {
       this._reportError('handleOffer', err, msg.from);
       this._removePeer(msg.from);
@@ -465,26 +519,28 @@ export class WebRTCManager {
 
   async _handleAnswer(msg) {
     if (this.destroyed) return;
-    const pc = this.peers.get(msg.from);
-    if (!pc) return;
+    const entry = this.peers.get(msg.from);
+    if (!entry) return;
     // A late/stray answer (e.g. arriving after glare resolution swapped our
     // local offer out, or after an ICE restart already produced a new offer)
     // would otherwise throw InvalidStateError on setRemoteDescription and
     // tear down a healthy pc. Only apply when we actually have a pending
     // local offer; otherwise log non-fatally and keep the connection.
-    if (pc.signalingState !== 'have-local-offer') {
-      this._reportError('handleAnswer.staleState', new Error(`unexpected signalingState=${pc.signalingState}`), msg.from, /* fatal */ false);
-      // If negotiation already settled via another path (stable), the watchdog
-      // is no longer guarding anything — leaving it armed would later tear
-      // down a healthy pc when the deadline fires. Clear it here so the
-      // "stale answer arrived after we already converged" case is benign.
-      if (pc.signalingState === 'stable') this._clearOfferWatchdog(msg.from);
+    if (entry.pc.signalingState !== 'have-local-offer') {
+      this._reportError('handleAnswer.staleState', new Error(`unexpected signalingState=${entry.pc.signalingState}`), msg.from, /* fatal */ false);
+      // The watchdog only guards the unanswered-local-offer deadlock. If
+      // signalingState is anything else, it's no longer load-bearing —
+      // leaving it armed would later tear down a healthy pc when the
+      // deadline fires. Clear unconditionally; the previous "only when
+      // stable" check missed have-remote-offer and have-*-pranswer.
+      this._clearOfferWatchdog(entry);
       return;
     }
     try {
-      await pc.setRemoteDescription(new RTCSessionDescription(msg.sdp));
-      this._clearOfferWatchdog(msg.from);
-      await this._flushPendingCandidates(msg.from);
+      await entry.pc.setRemoteDescription(new RTCSessionDescription(msg.sdp));
+      this._clearOfferWatchdog(entry);
+      if (!this._isFresh(msg.from, entry)) return;
+      await this._flushPendingCandidates(entry);
     } catch (err) {
       this._reportError('handleAnswer', err, msg.from);
       this._removePeer(msg.from);
@@ -493,14 +549,14 @@ export class WebRTCManager {
 
   async _handleIceCandidate(msg) {
     if (this.destroyed) return;
-    const pc = this.peers.get(msg.from);
-    if (!pc || !msg.candidate) return;
+    const entry = this.peers.get(msg.from);
+    if (!entry || !msg.candidate) return;
     // If the pc has no remote description yet (e.g. the polite-glare path
     // just rebuilt it and setRemoteDescription is still in flight), buffer
     // the candidate so the trickle isn't lost. _flushPendingCandidates drains
     // the queue once SDP is applied.
-    if (!pc.remoteDescription) {
-      const queue = this.pendingCandidates.get(msg.from) ?? [];
+    if (!entry.pc.remoteDescription) {
+      const queue = entry.pendingCandidates;
       // Bound the queue — a misbehaving peer shouldn't pin memory.
       // The queue can also straddle SDP epochs across a polite-glare rebuild
       // (we deliberately preserve it in _handleOffer so trickle isn't lost).
@@ -508,27 +564,24 @@ export class WebRTCManager {
       // by addIceCandidate at flush time — _flushPendingCandidates routes
       // those errors through _reportError with fatal=false, so the worst case
       // is a few benign warnings, not a torn-down connection.
-      const MAX_PENDING_CANDIDATES = 64;
       if (queue.length >= MAX_PENDING_CANDIDATES) {
         queue.shift();
         // Surface silent ICE degradation — chronic queue overflow indicates the
         // peer is producing candidates faster than we apply SDP, which on slow
         // polite-rebuild loops can drop genuinely useful pairs. Log once per
         // peer per session to avoid spamming.
-        if (!this._candidateOverflowWarned) this._candidateOverflowWarned = new Set();
-        if (!this._candidateOverflowWarned.has(msg.from)) {
-          this._candidateOverflowWarned.add(msg.from);
+        if (!entry.candidateOverflowWarned) {
+          entry.candidateOverflowWarned = true;
           this._reportError('iceCandidateBufferOverflow',
             new Error(`pending-candidate queue overflowed (${MAX_PENDING_CANDIDATES})`),
             msg.from, /* fatal */ false);
         }
       }
       queue.push(msg.candidate);
-      this.pendingCandidates.set(msg.from, queue);
       return;
     }
     try {
-      await pc.addIceCandidate(new RTCIceCandidate(msg.candidate));
+      await entry.pc.addIceCandidate(new RTCIceCandidate(msg.candidate));
     } catch (err) {
       // ICE candidate errors are common and recoverable (e.g. arrived before remote SDP).
       // Log but don't tear down the connection.
@@ -536,18 +589,16 @@ export class WebRTCManager {
     }
   }
 
-  async _flushPendingCandidates(peerId) {
-    const queue = this.pendingCandidates.get(peerId);
-    if (!queue || queue.length === 0) return;
-    this.pendingCandidates.delete(peerId);
-    const pc = this.peers.get(peerId);
-    if (!pc) return;
+  async _flushPendingCandidates(entry) {
+    const queue = entry.pendingCandidates;
+    if (queue.length === 0) return;
+    entry.pendingCandidates = [];
     for (const cand of queue) {
-      if (this.destroyed) return;
+      if (!this._isFresh(entry.id, entry)) return;
       try {
-        await pc.addIceCandidate(new RTCIceCandidate(cand));
+        await entry.pc.addIceCandidate(new RTCIceCandidate(cand));
       } catch (err) {
-        this._reportError('flushIceCandidate', err, peerId, /* fatal */ false);
+        this._reportError('flushIceCandidate', err, entry.id, /* fatal */ false);
       }
     }
   }
@@ -557,15 +608,16 @@ export class WebRTCManager {
     if (this.peers.has(peerId)) return this.peers.get(peerId);
 
     const pc = new RTCPeerConnection(RTC_CONFIG);
+    const entry = new PeerEntry(peerId, pc);
 
     pc.onicecandidate = ({ candidate }) => {
       // Identity check: a torn-down pc can still emit a trailing candidate
       // (the native side flushes its gatherer). Sending it to a peer we've
       // already removed (or worse, a rebuilt pc replaced this one in the
       // map) wastes bandwidth and confuses the remote. Drop unless the map
-      // still points at THIS pc instance.
+      // still points at THIS entry.
       if (!candidate) return;
-      if (this.peers.get(peerId) !== pc) return;
+      if (!this._isFresh(peerId, entry)) return;
       this.signaling.send({ type: 'ice_candidate', to: peerId, candidate });
     };
 
@@ -575,63 +627,67 @@ export class WebRTCManager {
     };
 
     pc.onconnectionstatechange = () => {
+      if (entry.closed) return;
       const state = pc.connectionState;
       if (state === 'connecting' || state === 'new') {
         this.onPeerState?.(peerId, 'connecting');
       } else if (state === 'connected') {
-        this._clearDisconnectTimer(peerId);
+        this._clearDisconnectTimer(entry);
+        entry.restartAttempts = 0; // healthy — reset backoff
         this.onPeerState?.(peerId, 'connected');
       } else if (state === 'disconnected') {
         // Often transient (brief radio drop). Give it 5s to recover on its own
         // before driving an explicit ICE restart from the initiator side.
         this.onPeerState?.(peerId, 'connecting');
-        this._scheduleIceRestart(peerId, 5000);
+        this._scheduleIceRestart(entry, 5000);
       } else if (state === 'failed') {
-        // Definitively broken — try ICE restart immediately. Keep the pc in the
-        // map so we don't lose state; UI shows 'connecting' until it recovers.
+        // Definitively broken — try ICE restart with exponential backoff.
+        // Without backoff, repeated 'failed' states (host out of range,
+        // radio off) would spin _restartIce → fail → 'failed' → restart …
+        // forever, burning CPU and spamming offers.
         this.onPeerState?.(peerId, 'connecting');
-        this._scheduleIceRestart(peerId, 0);
+        const delay = Math.min(
+          ICE_RESTART_BASE_MS * 2 ** entry.restartAttempts,
+          ICE_RESTART_MAX_MS,
+        );
+        this._scheduleIceRestart(entry, delay);
       } else if (state === 'closed') {
-        this._clearDisconnectTimer(peerId);
+        this._clearDisconnectTimer(entry);
         this.onPeerState?.(peerId, 'failed');
       }
     };
 
-    this.peers.set(peerId, pc);
+    this.peers.set(peerId, entry);
     this.onPeerState?.(peerId, 'connecting');
-    return pc;
+    return entry;
   }
 
   _removePeer(peerId) {
-    this._clearDisconnectTimer(peerId);
-    this._clearOfferWatchdog(peerId);
-    this.pendingCandidates.delete(peerId);
-    this.initiatorOf.delete(peerId);
-    const pc = this.peers.get(peerId);
-    if (pc) {
-      try { pc.close(); } catch (_) { /* already closed */ }
-      this.peers.delete(peerId);
-    }
+    const entry = this.peers.get(peerId);
+    if (!entry) return;
+    entry.closed = true;
+    this._clearDisconnectTimer(entry);
+    this._clearOfferWatchdog(entry);
+    this.peers.delete(peerId);
+    try { entry.pc.close(); } catch (_) { /* already closed */ }
   }
 
-  _scheduleIceRestart(peerId, delayMs) {
-    this._clearDisconnectTimer(peerId);
-    const t = setTimeout(() => {
-      this.disconnectTimers.delete(peerId);
-      const pc = this.peers.get(peerId);
-      if (!pc) return;
+  _scheduleIceRestart(entry, delayMs) {
+    this._clearDisconnectTimer(entry);
+    const peerId = entry.id;
+    entry.disconnectTimer = setTimeout(() => {
+      entry.disconnectTimer = null;
+      if (!this._isFresh(peerId, entry)) return;
       // If the connection has already recovered, don't kick a restart.
-      if (pc.connectionState === 'connected') return;
+      if (entry.pc.connectionState === 'connected') return;
       this._restartIce(peerId);
     }, delayMs);
-    this.disconnectTimers.set(peerId, t);
   }
 
-  _clearDisconnectTimer(peerId) {
-    const t = this.disconnectTimers.get(peerId);
-    if (t) {
-      clearTimeout(t);
-      this.disconnectTimers.delete(peerId);
+  _clearDisconnectTimer(entry) {
+    if (entry.disconnectTimer) {
+      clearTimeout(entry.disconnectTimer);
+      entry.disconnectTimer = null;
     }
   }
 
@@ -670,15 +726,6 @@ export class WebRTCManager {
     if (this.destroyed) return;
     const ids = Array.from(this.peers.keys());
     ids.forEach((id) => this._removePeer(id));
-    // Defensive: _removePeer already clears each peer's timer, but if a timer
-    // was somehow orphaned (peer removed but timer key left behind by a prior
-    // bug), flush the whole map so a stray restart can't fire post-reset.
-    this.disconnectTimers.forEach((t) => clearTimeout(t));
-    this.disconnectTimers.clear();
-    this.offerWatchdogs.forEach((t) => clearTimeout(t));
-    this.offerWatchdogs.clear();
-    this.pendingCandidates.clear();
-    this.initiatorOf.clear();
     this.pendingOffers = [];
     this.myId = null;
   }
@@ -689,30 +736,37 @@ export class WebRTCManager {
     // sibling handler the embedding hook might add. Run the prior handler
     // first so its observation-only side effects (logging, metrics) see the
     // raw message before the WebRTC state machine reacts to it.
+    //
+    // Caller-handler exceptions are logged (not silently swallowed) so a bug
+    // in a sibling listener doesn't disappear under a try/catch — the
+    // WebRTC state machine still runs either way.
     const handlers = this.signaling.handlers;
     const prevOffer = handlers.offer;
     const prevAnswer = handlers.answer;
     const prevIce = handlers.ice_candidate;
-    handlers.offer = (msg) => { try { prevOffer?.(msg); } catch (_) {} this._handleOffer(msg); };
-    handlers.answer = (msg) => { try { prevAnswer?.(msg); } catch (_) {} this._handleAnswer(msg); };
-    handlers.ice_candidate = (msg) => { try { prevIce?.(msg); } catch (_) {} this._handleIceCandidate(msg); };
+    const safeCall = (name, prev, msg) => {
+      if (!prev) return;
+      try { prev(msg); } catch (err) {
+        logger.warn('WebRTC', `sibling ${name} handler threw`, { error: err?.message ?? String(err) });
+      }
+    };
+    handlers.offer = (msg) => { safeCall('offer', prevOffer, msg); this._handleOffer(msg); };
+    handlers.answer = (msg) => { safeCall('answer', prevAnswer, msg); this._handleAnswer(msg); };
+    handlers.ice_candidate = (msg) => { safeCall('ice_candidate', prevIce, msg); this._handleIceCandidate(msg); };
   }
 
   destroy() {
     if (this.destroyed) return;
     this.destroyed = true;
-    this.disconnectTimers.forEach((t) => clearTimeout(t));
-    this.disconnectTimers.clear();
-    this.offerWatchdogs.forEach((t) => clearTimeout(t));
-    this.offerWatchdogs.clear();
-    this.pendingCandidates.clear();
-    this.initiatorOf.clear();
-    this.pendingOffers = [];
     this._stopSpeakingPoll();
-    this.peers.forEach((pc) => {
-      try { pc.close(); } catch (_) { /* already closed */ }
+    this.peers.forEach((entry) => {
+      entry.closed = true;
+      if (entry.disconnectTimer) clearTimeout(entry.disconnectTimer);
+      if (entry.offerWatchdog) clearTimeout(entry.offerWatchdog);
+      try { entry.pc.close(); } catch (_) { /* already closed */ }
     });
     this.peers.clear();
+    this.pendingOffers = [];
     if (this._localStatsPc) {
       try { this._localStatsPc.close(); } catch (_) { /* already closed */ }
       this._localStatsPc = null;
