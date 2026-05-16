@@ -16,6 +16,7 @@ function makeSocket(remoteAddress = '192.168.43.42') {
   return {
     on: jest.fn((ev, fn) => { handlers[ev] = fn; }),
     write: jest.fn(),
+    end: jest.fn(),
     destroy: jest.fn(),
     remoteAddress,
     _emit: (ev, ...args) => handlers[ev]?.(...args),
@@ -83,9 +84,14 @@ test('stopSignalingServer broadcasts room_closed to non-host clients before clos
 
   stopSignalingServer();
 
-  expect(guestSock.write).toHaveBeenCalledWith(expect.stringContaining('"type":"room_closed"'));
+  // The room_closed frame is delivered via socket.end(payload) so the FIN
+  // is queued *after* the bytes flush — an immediate destroy() could drop
+  // the un-flushed buffer and leave guests with "Lost connection" instead
+  // of the intended "Host closed the group" notice.
+  expect(guestSock.end).toHaveBeenCalledWith(expect.stringContaining('"type":"room_closed"'));
+  expect(guestSock.write).not.toHaveBeenCalled();
+  expect(hostSock.end).not.toHaveBeenCalled();
   expect(hostSock.write).not.toHaveBeenCalled();
-  expect(guestSock.destroy).toHaveBeenCalled();
   expect(hostSock.destroy).toHaveBeenCalled();
 });
 

@@ -174,8 +174,10 @@ export function useIntercom(store, { onKicked } = {}) {
       // circuit on the stale ids in our peer map and we'd come back silent.
       rtcRef.current?.resetPeers();
       // Drop the peer roster from the store too — peer_list will repopulate
-      // it once the rejoin completes.
-      storeRef.peers?.forEach?.((p) => storeRef.removePeer(p.id));
+      // it once the rejoin completes. Use clearPeers (a setter call) rather
+      // than iterating storeRef.peers, which is the render-time snapshot
+      // captured when _connect ran and would miss peers added since.
+      storeRef.clearPeers?.();
     };
 
     handlers.reconnected = () => {

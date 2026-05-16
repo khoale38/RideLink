@@ -160,24 +160,13 @@ export function useVOX(localStream, enabled = true, localLevelRef = null) {
       : null;
     if (IS_IOS) {
       // iOS path: poll the WebRTCManager-supplied level ref. No peer
-      // connection → ref stays at 0 → calibration would lock at -inf, so we
-      // wait until we see a non-zero sample before starting the timer.
-      const startedAt = Date.now();
+      // connection → ref stays at 0 → calibration would lock at -inf;
+      // the cross-platform calibrationWatchdog above is the canonical
+      // escape hatch for that case (sets calibrationFailed=true after 8s).
       const tick = () => {
         const level = localLevelRef?.current ?? 0;
         // 0..1 → dBFS. level=0 → -Infinity (silent / no pc yet).
         const db = level > 0 ? 20 * Math.log10(level) : -Infinity;
-        // Fallback: if no audible sample has arrived after 8s (e.g. solo
-        // host with no remote stats), give up on calibration so the rider
-        // isn't gated shut while waiting alone. The default threshold takes
-        // over; a manual recalibrate replaces it later.
-        if (calibrationActive && calibrationSamples.length === 0 && Date.now() - startedAt > 8000) {
-          logger.warn('VOX', 'no audio level yet — falling back to default threshold');
-          calibrationActive = false;
-          setCalibrating(false);
-          setCalibrationFailed(true);
-          return;
-        }
         onSample(db);
       };
       iosTimer = setInterval(tick, IOS_POLL_MS);

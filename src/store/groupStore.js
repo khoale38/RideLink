@@ -29,6 +29,13 @@ export function useGroupStore() {
     setPeers((prev) => prev.filter((p) => p.id !== id));
   }, []);
 
+  // Drop every peer from the roster. Used by useIntercom on signaling
+  // reconnect because iterating storeRef.peers would walk the stale render-
+  // time snapshot captured by _connect and miss anyone added later.
+  const clearPeers = useCallback(() => {
+    setPeers([]);
+  }, []);
+
   const setPeerSpeaking = useCallback((id, speaking) => {
     setPeers((prev) =>
       prev.map((p) => (p.id === id ? { ...p, speaking } : p)),
@@ -60,7 +67,7 @@ export function useGroupStore() {
   return {
     myName, setMyName,
     myId, setMyId,
-    peers, addPeer, removePeer, setPeerSpeaking, setPeerConnectionState,
+    peers, addPeer, removePeer, clearPeers, setPeerSpeaking, setPeerConnectionState,
     role, setRole,
     connected, setConnected,
     muted, setMuted,

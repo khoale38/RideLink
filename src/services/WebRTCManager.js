@@ -30,6 +30,11 @@ export class WebRTCManager {
     this.peers = new Map(); // peerId -> RTCPeerConnection
     this.initiatorOf = new Set(); // peer ids where WE created the original offer
     this.disconnectTimers = new Map(); // peerId -> Timeout for ICE-restart grace
+    // peerId -> Timeout that fires if our local offer never gets an answer.
+    // Guards the impolite-glare deadlock where we ignored the polite peer's
+    // offer and their answer to ours never arrived (they tore down their pc),
+    // leaving signalingState stuck in 'have-local-offer' indefinitely.
+    this.offerWatchdogs = new Map();
     this.localStream = null;
     this.destroyed = false;
     this.myId = null; // set by setMyId() — used for polite-peer tie-break on glare
@@ -40,6 +45,13 @@ export class WebRTCManager {
     // Offers that arrived before setMyId() — replayed once we know our id so
     // the glare tie-break in _handleOffer is symmetric on both peers.
     this.pendingOffers = [];
+    // peerId -> [candidate, ...]. ICE candidates that arrived before the
+    // pc had a remote description applied (the gap between
+    // _createPeerConnection and setRemoteDescription, especially on the
+    // polite-glare path where we tear down and rebuild). Without buffering,
+    // these throw InvalidStateError on addIceCandidate and the trickle is
+    // lost, delaying connect by seconds on slow links.
+    this.pendingCandidates = new Map();
 
     this._bindSignalingHandlers();
     this._startSpeakingPoll();
@@ -108,8 +120,8 @@ export class WebRTCManager {
       this.onLocalAudioLevel?.(localLevel);
       if (this.destroyed) return;
       const nextMs = this.peers.size > 4 ? slowMs : fastMs;
-      if (nextMs !== currentMs && __DEV__) {
-        console.warn(`[WebRTC] speaking poll cadence → ${nextMs}ms (${this.peers.size} peers)`);
+      if (nextMs !== currentMs) {
+        logger.warn('WebRTC', `speaking poll cadence → ${nextMs}ms`, { peers: this.peers.size });
       }
       schedule(nextMs);
     };
@@ -244,9 +256,37 @@ export class WebRTCManager {
       if (this.destroyed) return;
       await pc.setLocalDescription(offer);
       this.signaling.send({ type: 'offer', to: peerId, sdp: offer });
+      this._armOfferWatchdog(peerId);
     } catch (err) {
       this._reportError('callPeer', err, peerId);
       this._removePeer(peerId);
+    }
+  }
+
+  // If our local offer is still unanswered after a generous window, force a
+  // recovery: tear down the pc and let the peer (re-)initiate via peer_list
+  // replay on next reconnect, or via the larger-id ICE-restart election.
+  // Without this, the impolite-glare path can leave us stuck in
+  // 'have-local-offer' forever and the rider hears nothing.
+  _armOfferWatchdog(peerId) {
+    this._clearOfferWatchdog(peerId);
+    const t = setTimeout(() => {
+      this.offerWatchdogs.delete(peerId);
+      const pc = this.peers.get(peerId);
+      if (!pc || this.destroyed) return;
+      if (pc.signalingState !== 'have-local-offer') return; // answered or rolled back
+      if (__DEV__) console.warn('[WebRTC] offer watchdog: tearing down stuck pc for', peerId);
+      this._reportError('offerWatchdog', new Error('offer unanswered, tearing down'), peerId, /* fatal */ false);
+      this._removePeer(peerId);
+    }, 15000);
+    this.offerWatchdogs.set(peerId, t);
+  }
+
+  _clearOfferWatchdog(peerId) {
+    const t = this.offerWatchdogs.get(peerId);
+    if (t) {
+      clearTimeout(t);
+      this.offerWatchdogs.delete(peerId);
     }
   }
 
@@ -266,6 +306,7 @@ export class WebRTCManager {
       if (this.destroyed) return;
       await pc.setLocalDescription(offer);
       this.signaling.send({ type: 'offer', to: peerId, sdp: offer });
+      this._armOfferWatchdog(peerId);
       this.onPeerState?.(peerId, 'connecting');
     } catch (err) {
       this._reportError('restartIce', err, peerId, /* fatal */ false);
@@ -312,6 +353,7 @@ export class WebRTCManager {
     try {
       this.localStream?.getTracks().forEach((t) => pc.addTrack(t, this.localStream));
       await pc.setRemoteDescription(new RTCSessionDescription(msg.sdp));
+      await this._flushPendingCandidates(msg.from);
       const answer = await pc.createAnswer();
       if (this.destroyed) return;
       await pc.setLocalDescription(answer);
@@ -336,6 +378,8 @@ export class WebRTCManager {
     }
     try {
       await pc.setRemoteDescription(new RTCSessionDescription(msg.sdp));
+      this._clearOfferWatchdog(msg.from);
+      await this._flushPendingCandidates(msg.from);
     } catch (err) {
       this._reportError('handleAnswer', err, msg.from);
       this._removePeer(msg.from);
@@ -345,12 +389,41 @@ export class WebRTCManager {
   async _handleIceCandidate(msg) {
     const pc = this.peers.get(msg.from);
     if (!pc || !msg.candidate) return;
+    // If the pc has no remote description yet (e.g. the polite-glare path
+    // just rebuilt it and setRemoteDescription is still in flight), buffer
+    // the candidate so the trickle isn't lost. _flushPendingCandidates drains
+    // the queue once SDP is applied.
+    if (!pc.remoteDescription) {
+      const queue = this.pendingCandidates.get(msg.from) ?? [];
+      // Bound the queue — a misbehaving peer shouldn't pin memory.
+      const MAX_PENDING_CANDIDATES = 64;
+      if (queue.length >= MAX_PENDING_CANDIDATES) queue.shift();
+      queue.push(msg.candidate);
+      this.pendingCandidates.set(msg.from, queue);
+      return;
+    }
     try {
       await pc.addIceCandidate(new RTCIceCandidate(msg.candidate));
     } catch (err) {
       // ICE candidate errors are common and recoverable (e.g. arrived before remote SDP).
       // Log but don't tear down the connection.
       this._reportError('addIceCandidate', err, msg.from, /* fatal */ false);
+    }
+  }
+
+  async _flushPendingCandidates(peerId) {
+    const queue = this.pendingCandidates.get(peerId);
+    if (!queue || queue.length === 0) return;
+    this.pendingCandidates.delete(peerId);
+    const pc = this.peers.get(peerId);
+    if (!pc) return;
+    for (const cand of queue) {
+      if (this.destroyed) return;
+      try {
+        await pc.addIceCandidate(new RTCIceCandidate(cand));
+      } catch (err) {
+        this._reportError('flushIceCandidate', err, peerId, /* fatal */ false);
+      }
     }
   }
 
@@ -401,6 +474,8 @@ export class WebRTCManager {
 
   _removePeer(peerId) {
     this._clearDisconnectTimer(peerId);
+    this._clearOfferWatchdog(peerId);
+    this.pendingCandidates.delete(peerId);
     this.initiatorOf.delete(peerId);
     const pc = this.peers.get(peerId);
     if (pc) {
@@ -470,6 +545,9 @@ export class WebRTCManager {
     // bug), flush the whole map so a stray restart can't fire post-reset.
     this.disconnectTimers.forEach((t) => clearTimeout(t));
     this.disconnectTimers.clear();
+    this.offerWatchdogs.forEach((t) => clearTimeout(t));
+    this.offerWatchdogs.clear();
+    this.pendingCandidates.clear();
     this.initiatorOf.clear();
     this.pendingOffers = [];
     this.myId = null;
@@ -487,6 +565,9 @@ export class WebRTCManager {
     this.destroyed = true;
     this.disconnectTimers.forEach((t) => clearTimeout(t));
     this.disconnectTimers.clear();
+    this.offerWatchdogs.forEach((t) => clearTimeout(t));
+    this.offerWatchdogs.clear();
+    this.pendingCandidates.clear();
     this.initiatorOf.clear();
     this.pendingOffers = [];
     this._stopSpeakingPoll();

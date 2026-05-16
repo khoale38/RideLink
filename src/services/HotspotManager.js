@@ -50,9 +50,11 @@ export async function isIOSHotspotActive() {
   return new Promise((resolve) => {
     let settled = false;
     let server = null;
+    let timer = null;
     const done = (result) => {
       if (settled) return;
       settled = true;
+      if (timer) { clearTimeout(timer); timer = null; }
       try { server?.close(); } catch (_) { /* ignore */ }
       resolve(result);
     };
@@ -63,7 +65,7 @@ export async function isIOSHotspotActive() {
     } catch {
       done(false);
     }
-    setTimeout(() => done(false), 1500);
+    timer = setTimeout(() => done(false), 1500);
   });
 }
 

@@ -145,6 +145,18 @@ export function startSignalingServer(onEvent) {
       const entry = clients.get(clientId);
       if (entry) {
         clearTimeout(entry.joinTimer);
+        // If the peer had already joined, tell everyone else it's gone. The
+        // 'close' handler usually does this, but when 'error' fires first
+        // (e.g. ECONNRESET on a crashed device) and we delete the client
+        // here, the subsequent 'close' handler finds nothing to broadcast.
+        // Without this, the dead peer lingers in everyone's roster until
+        // they each detect WebRTC failure independently.
+        if (entry.joined) {
+          _broadcast({ type: 'peer_left', id: clientId, name: entry.name }, clientId);
+          if (!entry.isHost) {
+            onEvent?.({ type: 'peer_left', id: clientId, name: entry.name });
+          }
+        }
         try { entry.socket.destroy(); } catch (_) { /* ignore */ }
       }
       clients.delete(clientId);
@@ -166,13 +178,23 @@ export function stopSignalingServer() {
   // Tell guests we're closing on purpose so their UI can route home instead
   // of showing "Connecting…" forever. Sent before destroy() so the byte
   // hits the wire before the FIN.
-  clients.forEach((entry) => {
-    if (entry.isHost || !entry.joined) return;
-    try { entry.socket.write(JSON.stringify({ type: 'room_closed' }) + '\n'); } catch (_) { /* ignore */ }
-  });
+  // Use socket.end(payload) instead of write+destroy: end() queues the FIN
+  // *after* the bytes flush, so the room_closed frame reliably reaches the
+  // guest before the connection tears down. An immediate destroy() can drop
+  // un-flushed data, which left guests bouncing through "reconnecting →
+  // gave_up" with a "Lost connection" alert instead of the intended
+  // "Host closed the group" notice.
   clients.forEach((entry) => {
     clearTimeout(entry.joinTimer);
-    try { entry.socket.destroy(); } catch (_) { /* ignore */ }
+    if (entry.isHost || !entry.joined) {
+      try { entry.socket.destroy(); } catch (_) { /* ignore */ }
+      return;
+    }
+    try {
+      entry.socket.end(JSON.stringify({ type: 'room_closed' }) + '\n');
+    } catch (_) {
+      try { entry.socket.destroy(); } catch (_e) { /* ignore */ }
+    }
   });
   clients.clear();
   // Wait for the listener to actually release the port. Without this an

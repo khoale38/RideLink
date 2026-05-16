@@ -166,6 +166,75 @@ test('pendingOffers is capped to prevent unbounded growth before setMyId', async
   rtc.destroy();
 });
 
+test('ICE candidate arriving before remote SDP is buffered and flushed after setRemoteDescription', async () => {
+  // Stand up a pc that reports no remoteDescription until setRemoteDescription
+  // is called. Mirrors the polite-glare path where we tear down and rebuild,
+  // and trickle ICE arrives in the gap before SDP is applied.
+  const pc = makePc();
+  pc.remoteDescription = null;
+  pc.setRemoteDescription = jest.fn(async (sdp) => { pc.remoteDescription = sdp; });
+  RTCPeerConnection.mockImplementation(() => pc);
+  const signaling = makeSignaling();
+  const rtc = new WebRTCManager(signaling, jest.fn(), jest.fn(), jest.fn(), jest.fn());
+  rtc.setMyId('peer-a');
+  // Seed the pc into the peer map by creating it directly.
+  rtc._createPeerConnection('peer-b');
+
+  // Candidate lands BEFORE the offer is handled.
+  await rtc._handleIceCandidate({ from: 'peer-b', candidate: { candidate: 'c1', sdpMLineIndex: 0 } });
+  expect(pc.addIceCandidate).not.toHaveBeenCalled();
+  expect(rtc.pendingCandidates.get('peer-b')).toHaveLength(1);
+
+  // Now the offer arrives — setRemoteDescription is called, then the
+  // buffered candidate is replayed.
+  await rtc._handleOffer({ from: 'peer-b', sdp: { type: 'offer', sdp: 'remote' } });
+
+  expect(pc.setRemoteDescription).toHaveBeenCalled();
+  expect(pc.addIceCandidate).toHaveBeenCalledTimes(1);
+  expect(rtc.pendingCandidates.has('peer-b')).toBe(false);
+  rtc.destroy();
+});
+
+test('offer watchdog tears down a pc that never receives an answer', async () => {
+  jest.useFakeTimers();
+  const pc = makePc({ signalingState: 'have-local-offer' });
+  RTCPeerConnection.mockImplementation(() => pc);
+  const signaling = makeSignaling();
+  const rtc = new WebRTCManager(signaling, jest.fn(), jest.fn(), jest.fn(), jest.fn());
+  rtc.setMyId('peer-z');
+  await rtc.callPeer('peer-a');
+  expect(rtc.peers.has('peer-a')).toBe(true);
+  expect(rtc.offerWatchdogs.has('peer-a')).toBe(true);
+
+  // Fast-forward past the watchdog window. The pc is still in
+  // 'have-local-offer' → watchdog fires → peer removed.
+  jest.advanceTimersByTime(16000);
+  expect(pc.close).toHaveBeenCalled();
+  expect(rtc.peers.has('peer-a')).toBe(false);
+  rtc.destroy();
+  jest.useRealTimers();
+});
+
+test('offer watchdog cleared when answer arrives', async () => {
+  jest.useFakeTimers();
+  const pc = makePc({ signalingState: 'have-local-offer' });
+  RTCPeerConnection.mockImplementation(() => pc);
+  const signaling = makeSignaling();
+  const rtc = new WebRTCManager(signaling, jest.fn(), jest.fn(), jest.fn(), jest.fn());
+  rtc.setMyId('peer-z');
+  await rtc.callPeer('peer-a');
+
+  await rtc._handleAnswer({ from: 'peer-a', sdp: { type: 'answer', sdp: 'ok' } });
+  expect(rtc.offerWatchdogs.has('peer-a')).toBe(false);
+
+  // Even past the deadline, no teardown happens.
+  jest.advanceTimersByTime(20000);
+  expect(pc.close).not.toHaveBeenCalled();
+  expect(rtc.peers.has('peer-a')).toBe(true);
+  rtc.destroy();
+  jest.useRealTimers();
+});
+
 test('glare: lexicographically larger id is impolite and ignores incoming offer', async () => {
   const existing = makePc({ signalingState: 'have-local-offer' });
   RTCPeerConnection.mockImplementation(() => existing);
