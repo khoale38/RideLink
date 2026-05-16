@@ -138,6 +138,26 @@ export function useVOX(localStream, enabled = true, localLevelRef = null) {
 
     let iosTimer = null;
     let stopRecorder = null;
+    // Belt-and-suspenders calibration timeout: applies to BOTH platforms.
+    // - iOS already has an 8s watchdog inside its tick, but if the timer
+    //   itself never fires (e.g. Date.now drift, app paused), we still
+    //   want a hard cap.
+    // - Android: a truly silent room makes _rmsDb() return -Infinity, which
+    //   onSample() drops as non-finite — calibrationDoneAt is never set and
+    //   the rider stays gated shut. This timer is the only escape.
+    const calibrationWatchdog = calibrationActive
+      ? setTimeout(() => {
+          if (!calibrationActive) return;
+          if (calibrationSamples.length === 0) {
+            logger.warn('VOX', 'calibration window elapsed with no audible samples — using default threshold');
+            calibrationActive = false;
+            setCalibrating(false);
+            setCalibrationFailed(true);
+          } else {
+            finishCalibration();
+          }
+        }, 8000)
+      : null;
     if (IS_IOS) {
       // iOS path: poll the WebRTCManager-supplied level ref. No peer
       // connection → ref stays at 0 → calibration would lock at -inf, so we
@@ -182,6 +202,7 @@ export function useVOX(localStream, enabled = true, localLevelRef = null) {
 
     return () => {
       if (iosTimer) clearInterval(iosTimer);
+      if (calibrationWatchdog) clearTimeout(calibrationWatchdog);
       if (stopRecorder) stopRecorder();
       clearTimeout(holdTimer.current);
       speakingRef.current = false;

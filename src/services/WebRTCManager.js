@@ -278,20 +278,32 @@ export class WebRTCManager {
     // Glare tie-break needs our own id. If an offer arrives before peer_list
     // has set it (rare race on first join), buffer until setMyId() replays.
     if (!this.myId) {
+      // Cap the queue so a peer that never sees us reach setMyId (signaling
+      // failure mid-join, or the resetPeers→peer_list window) can't pin
+      // memory indefinitely by re-sending offers.
+      const MAX_PENDING_OFFERS = 16;
+      if (this.pendingOffers.length >= MAX_PENDING_OFFERS) this.pendingOffers.shift();
       this.pendingOffers.push(msg);
       return;
     }
 
-    // Offer glare: we already have a peer connection mid-negotiation with this
-    // peer. Perfect-negotiation tie-break — the lexicographically smaller id is
-    // "polite" and yields; the impolite side ignores the incoming offer.
+    // Offer glare / mid-renegotiation: if we already have a pc with this peer
+    // that is NOT in 'stable', applying setRemoteDescription will throw
+    // InvalidStateError. Perfect-negotiation tie-break — the lexicographically
+    // smaller id is "polite" and yields; the impolite side drops the offer.
+    // We treat any non-stable signalingState the same way: 'have-local-offer'
+    // is classic glare, but 'have-remote-offer' / 'have-local-pranswer' /
+    // 'have-remote-pranswer' (ICE-restart races) need the same handling.
     const existing = this.peers.get(msg.from);
-    if (existing && existing.signalingState === 'have-local-offer') {
+    if (existing && existing.signalingState && existing.signalingState !== 'stable') {
       const polite = this.myId < msg.from;
       if (!polite) {
-        if (__DEV__) console.warn('[WebRTC] glare: ignoring offer from', msg.from);
+        if (__DEV__) console.warn('[WebRTC] glare: ignoring offer from', msg.from, 'in', existing.signalingState);
         return;
       }
+      // Polite side: tear down the in-flight local pc and accept the remote
+      // offer on a fresh one. _createPeerConnection short-circuits when the
+      // peer is already present, so the removal must happen first.
       this._removePeer(msg.from);
     }
 
@@ -313,6 +325,15 @@ export class WebRTCManager {
   async _handleAnswer(msg) {
     const pc = this.peers.get(msg.from);
     if (!pc) return;
+    // A late/stray answer (e.g. arriving after glare resolution swapped our
+    // local offer out, or after an ICE restart already produced a new offer)
+    // would otherwise throw InvalidStateError on setRemoteDescription and
+    // tear down a healthy pc. Only apply when we actually have a pending
+    // local offer; otherwise log non-fatally and keep the connection.
+    if (pc.signalingState !== 'have-local-offer') {
+      this._reportError('handleAnswer.staleState', new Error(`unexpected signalingState=${pc.signalingState}`), msg.from, /* fatal */ false);
+      return;
+    }
     try {
       await pc.setRemoteDescription(new RTCSessionDescription(msg.sdp));
     } catch (err) {

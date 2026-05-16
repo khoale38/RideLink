@@ -10,6 +10,7 @@
  */
 /* global Buffer */
 import TcpSocket from 'react-native-tcp-socket';
+import { logger } from './logger';
 
 const CONNECT_TIMEOUT_MS = 10000;
 const RECONNECT_BASE_MS = 1000;
@@ -94,7 +95,7 @@ export class SignalingClient {
         const chunk = Buffer.isBuffer(raw) ? raw : Buffer.from(raw);
         this.buffer = this.buffer.length ? Buffer.concat([this.buffer, chunk]) : chunk;
         if (this.buffer.length > MAX_BUFFER_BYTES) {
-          if (__DEV__) console.warn('[Signaling] receive buffer overflow, dropping connection');
+          logger.warn('Signaling', 'receive buffer overflow, dropping connection');
           try { this.socket?.destroy(); } catch (_) { /* ignore */ }
           this.buffer = Buffer.alloc(0);
           return;
@@ -105,7 +106,7 @@ export class SignalingClient {
           const lineBuf = this.buffer.subarray(0, nl);
           this.buffer = this.buffer.subarray(nl + 1);
           if (lineBuf.length > MAX_LINE_BYTES) {
-            if (__DEV__) console.warn('[Signaling] oversized message from host — dropping connection');
+            logger.warn('Signaling', 'oversized message from host — dropping connection');
             try { this.socket?.destroy(); } catch (_) { /* ignore */ }
             this.buffer = Buffer.alloc(0);
             return;
@@ -116,13 +117,13 @@ export class SignalingClient {
           try {
             msg = JSON.parse(line);
           } catch (err) {
-            if (__DEV__) console.warn('[Signaling] dropped malformed message:', line);
+            logger.warn('Signaling', 'dropped malformed message', { line });
             continue;
           }
           try {
             this.handlers[msg.type]?.(msg);
           } catch (err) {
-            if (__DEV__) console.warn('[Signaling] handler for', msg.type, 'threw:', err);
+            logger.warn('Signaling', `handler for ${msg.type} threw`, { error: err?.message ?? String(err) });
           }
         }
       });
@@ -171,7 +172,7 @@ export class SignalingClient {
 
     const attempt = ++this.reconnectAttempt;
     const delay = Math.min(RECONNECT_BASE_MS * 2 ** (attempt - 1), RECONNECT_MAX_MS);
-    if (__DEV__) console.warn(`[Signaling] reconnect attempt ${attempt} in ${delay}ms`);
+    logger.warn('Signaling', `reconnect attempt ${attempt} in ${delay}ms`);
     this.handlers.reconnecting?.({ attempt, delayMs: delay });
 
     this.reconnectTimer = setTimeout(() => {
@@ -190,7 +191,7 @@ export class SignalingClient {
       this.socket.write(JSON.stringify(msg) + '\n');
       return true;
     } catch (err) {
-      if (__DEV__) console.warn('[Signaling] write failed:', err?.message ?? err);
+      logger.warn('Signaling', 'write failed', { error: err?.message ?? String(err) });
       return false;
     }
   }

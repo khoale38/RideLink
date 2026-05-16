@@ -128,6 +128,44 @@ test('_restartIce: smaller id stays silent (waits for peer to drive)', async () 
   rtc.destroy();
 });
 
+test('_handleAnswer: ignores answer when signalingState is not have-local-offer (stale answer should not tear down healthy pc)', async () => {
+  // Reproduce: a late answer arrives after glare resolution swapped our local
+  // offer out. The pc is now 'stable' (or 'have-remote-offer'). Old code
+  // called setRemoteDescription unconditionally → InvalidStateError → pc torn
+  // down. New behavior: log non-fatally, keep the pc.
+  const pc = makePc({ signalingState: 'stable' });
+  RTCPeerConnection.mockImplementation(() => pc);
+  const signaling = makeSignaling();
+  const onError = jest.fn();
+  const rtc = new WebRTCManager(signaling, jest.fn(), onError, jest.fn(), jest.fn());
+  rtc.setMyId('peer-a');
+  await rtc.callPeer('peer-b');
+  pc.setRemoteDescription.mockClear();
+
+  await rtc._handleAnswer({ from: 'peer-b', sdp: { type: 'answer', sdp: 'late' } });
+
+  expect(pc.setRemoteDescription).not.toHaveBeenCalled();
+  expect(pc.close).not.toHaveBeenCalled();
+  expect(rtc.peers.get('peer-b')).toBe(pc);
+  // Non-fatal: onError (fatal callback) is NOT invoked.
+  expect(onError).not.toHaveBeenCalled();
+  rtc.destroy();
+});
+
+test('pendingOffers is capped to prevent unbounded growth before setMyId', async () => {
+  RTCPeerConnection.mockImplementation(() => makePc());
+  const signaling = makeSignaling();
+  const rtc = new WebRTCManager(signaling, jest.fn(), jest.fn(), jest.fn(), jest.fn());
+  // Push more than the cap (16) of pre-setMyId offers.
+  for (let i = 0; i < 25; i++) {
+    await rtc._handleOffer({ from: `peer-${i}`, sdp: { type: 'offer', sdp: 'x' } });
+  }
+  expect(rtc.pendingOffers.length).toBeLessThanOrEqual(16);
+  // FIFO: oldest dropped, newest retained.
+  expect(rtc.pendingOffers[rtc.pendingOffers.length - 1].from).toBe('peer-24');
+  rtc.destroy();
+});
+
 test('glare: lexicographically larger id is impolite and ignores incoming offer', async () => {
   const existing = makePc({ signalingState: 'have-local-offer' });
   RTCPeerConnection.mockImplementation(() => existing);

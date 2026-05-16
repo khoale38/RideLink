@@ -191,7 +191,6 @@ const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: '#0d0d0d', padding: 20 },
 
   header: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 16 },
-  logo: { fontSize: 28, fontWeight: '800', color: '#f5a623' },
   badge: { borderRadius: 8, paddingHorizontal: 10, paddingVertical: 4 },
   badgeOn: { backgroundColor: '#1a4a1a' },
   badgeOff: { backgroundColor: '#3a2a00' },
@@ -208,18 +207,6 @@ const styles = StyleSheet.create({
   iosNote: { color: '#f5a623', fontSize: 11, marginTop: 6 },
   qrWrapper: { alignItems: 'center' },
   qrCaption: { color: '#aaa', fontSize: 10, marginTop: 4, fontWeight: '600' },
-
-  voxIndicator: {
-    flexDirection: 'row', alignItems: 'center',
-    backgroundColor: '#1a1a1a', borderRadius: 10,
-    paddingHorizontal: 14, paddingVertical: 10,
-    marginBottom: 16, borderWidth: 1, borderColor: '#2a2a2a',
-  },
-  voxIndicatorActive: { borderColor: '#4caf50', backgroundColor: '#0d2010' },
-  voxDot: { width: 10, height: 10, borderRadius: 5, backgroundColor: '#555', marginRight: 10 },
-  voxDotActive: { backgroundColor: '#4caf50' },
-  voxLabel: { color: '#666', fontSize: 13, fontWeight: '600', letterSpacing: 1 },
-  voxLabelActive: { color: '#4caf50' },
 
   sectionLabel: { color: '#555', fontSize: 11, fontWeight: '700', marginBottom: 8, letterSpacing: 1 },
   meshWarning: { color: '#f5a623', fontSize: 11, marginBottom: 6 },
@@ -241,11 +228,6 @@ const styles = StyleSheet.create({
   riderInfo: { flex: 1 },
   riderName: { color: '#fff', fontSize: 16 },
   riderStatus: { fontSize: 11, marginTop: 2, fontWeight: '600' },
-  speakingBadge: {
-    color: '#4caf50', fontSize: 11, fontWeight: '700',
-    backgroundColor: '#0d2010', paddingHorizontal: 8, paddingVertical: 3, borderRadius: 6,
-  },
-
   voxSettings: {
     backgroundColor: '#1a1a1a', borderRadius: 12,
     padding: 14, marginTop: 12, marginBottom: 8,
@@ -262,7 +244,6 @@ const styles = StyleSheet.create({
   },
   recalBtnActive: { borderColor: '#f5a623' },
   recalBtnText: { color: '#ccc', fontSize: 12, fontWeight: '600' },
-  voxNote: { color: '#888', fontSize: 11, marginTop: 6, fontStyle: 'italic' },
   settingLabel: { color: '#aaa', fontSize: 13 },
   dbValue: { color: '#f5a623', fontWeight: '700' },
   sliderHint: { color: '#555', fontSize: 10, textAlign: 'right', marginBottom: 2 },

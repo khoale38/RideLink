@@ -11,8 +11,10 @@ import { useVOX } from './src/hooks/useVOX';
 function App() {
   const store = useGroupStore();
   const { hostGroup, joinGroup, leaveGroup, toggleMute, localStream, localLevelRef } = useIntercom(store, {
-    onKicked: (reason: 'host_closed_room' | 'connection_lost') => {
-      leaveGroup();
+    onKicked: async (reason: 'host_closed_room' | 'connection_lost') => {
+      // Await teardown so a user tapping Host/Join immediately after the alert
+      // dismisses doesn't race a still-running signaling server / FG service.
+      try { await leaveGroup(); } catch (_) { /* best-effort */ }
       setScreen('home');
       Alert.alert(
         reason === 'host_closed_room' ? 'Host closed the group' : 'Lost connection',
@@ -46,7 +48,8 @@ function App() {
       await hostGroup(name);
       setScreen('group');
     } catch (err: any) {
-      leaveGroup();
+      // useIntercom.hostGroup already awaits leaveGroup() in its catch, so a
+      // second leaveGroup() here would race the first. Just surface the error.
       Alert.alert('Could not start group', err?.message ?? String(err));
     } finally {
       setBusy(false);
@@ -60,16 +63,19 @@ function App() {
       await joinGroup(name, password);
       setScreen('group');
     } catch (err: any) {
-      leaveGroup();
+      // See handleHost — joinGroup already cleans up on failure.
       Alert.alert('Could not join group', err?.message ?? String(err));
     } finally {
       setBusy(false);
     }
   };
 
-  const handleLeave = () => {
-    leaveGroup();
+  const handleLeave = async () => {
+    // Flip the screen first so the UI feels instantaneous; native teardown
+    // continues in the background. Errors here are best-effort — leaveGroup
+    // already swallows them internally.
     setScreen('home');
+    try { await leaveGroup(); } catch (_) { /* best-effort */ }
   };
 
   // Keep the screen on whenever we're in a group — riders can't tap the screen
