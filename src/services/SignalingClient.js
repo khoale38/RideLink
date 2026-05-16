@@ -204,6 +204,9 @@ export class SignalingClient {
       clearTimeout(this.reconnectTimer);
       this.reconnectTimer = null;
     }
+    // Drop listeners before destroy so any late 'close'/'error' from the
+    // platform layer can't re-enter markDead() on a torn-down instance.
+    try { this.socket?.removeAllListeners?.(); } catch (_) { /* ignore */ }
     try { this.socket?.destroy(); } catch (_) { /* ignore */ }
     this.socket = null;
   }

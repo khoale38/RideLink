@@ -197,7 +197,13 @@ export class WebRTCManager {
     // would otherwise each build a loopback pc pair; the first assignment
     // would be orphaned with no close() ever called. Share the promise so
     // every caller awaits the same single setup.
-    if (this._localStatsPcSetup) return this._localStatsPcSetup;
+    if (this._localStatsPcSetup) {
+      await this._localStatsPcSetup;
+      // If the in-flight build failed, _localStatsPc stays null. Let the
+      // next caller retry instead of silently returning a half-init state.
+      if (!this._localStatsPc && !this.destroyed) return this._ensureLocalStatsPc();
+      return;
+    }
     this._localStatsPcSetup = this._buildLocalStatsPc();
     try {
       await this._localStatsPcSetup;
