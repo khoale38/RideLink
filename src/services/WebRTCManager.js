@@ -164,11 +164,31 @@ export class WebRTCManager {
     const pc = new RTCPeerConnection(RTC_CONFIG);
     const pcRemote = new RTCPeerConnection(RTC_CONFIG);
     try {
+      // Surface loopback ICE errors as non-fatal so a broken handshake doesn't
+      // silently leave _localStatsPc unset (solo-host speaking indicator dead).
       pc.addEventListener?.('icecandidate', (e) => {
-        if (e.candidate) { try { pcRemote.addIceCandidate(e.candidate); } catch (_) {} }
+        if (e.candidate) {
+          try {
+            const p = pcRemote.addIceCandidate(e.candidate);
+            if (p && typeof p.catch === 'function') {
+              p.catch((err) => this._reportError('localStatsPc.addIce(remote)', err, null, /* fatal */ false));
+            }
+          } catch (err) {
+            this._reportError('localStatsPc.addIce(remote)', err, null, /* fatal */ false);
+          }
+        }
       });
       pcRemote.addEventListener?.('icecandidate', (e) => {
-        if (e.candidate) { try { pc.addIceCandidate(e.candidate); } catch (_) {} }
+        if (e.candidate) {
+          try {
+            const p = pc.addIceCandidate(e.candidate);
+            if (p && typeof p.catch === 'function') {
+              p.catch((err) => this._reportError('localStatsPc.addIce(local)', err, null, /* fatal */ false));
+            }
+          } catch (err) {
+            this._reportError('localStatsPc.addIce(local)', err, null, /* fatal */ false);
+          }
+        }
       });
       // Critical: the loopback handshake makes pcRemote auto-play the received
       // audio through the device speaker (same path the mic test uses on

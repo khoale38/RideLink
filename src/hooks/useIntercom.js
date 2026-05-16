@@ -208,10 +208,22 @@ export function useIntercom(store, { onKicked } = {}) {
     );
     rtcRef.current = rtc;
 
-    await client.connect();
-    const stream = await rtc.startLocalAudio();
-    setLocalStream(stream);
-    client.send({ type: 'join', name, isHost: !!opts.isHost });
+    // If any step fails partway, fully tear down so a half-initialised
+    // WebRTCManager (no local stream, stats PC not stood up) isn't left in
+    // rtcRef — a later reconnect would short-circuit and the rider stays mute.
+    try {
+      await client.connect();
+      const stream = await rtc.startLocalAudio();
+      setLocalStream(stream);
+      client.send({ type: 'join', name, isHost: !!opts.isHost });
+    } catch (err) {
+      try { rtc.destroy(); } catch (_) { /* ignore */ }
+      try { client.disconnect(); } catch (_) { /* ignore */ }
+      if (rtcRef.current === rtc) rtcRef.current = null;
+      if (signalingRef.current === client) signalingRef.current = null;
+      setLocalStream(null);
+      throw err;
+    }
   }
 
   return { hostGroup, joinGroup, leaveGroup, toggleMute, localStream, localLevelRef };

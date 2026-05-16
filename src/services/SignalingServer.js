@@ -246,6 +246,26 @@ function _handleMessage(clientId, msg, onEvent) {
         if (__DEV__) console.warn(`[SignalingServer] ${msg.type} for unknown peer:`, msg.to);
         return;
       }
+      // Shape-check the payload before relaying. A malformed sdp/candidate
+      // from a buggy peer would otherwise propagate and break setRemote-
+      // Description on the other side. We don't validate SDP/candidate
+      // contents — just the envelope — since the receiving WebRTC stack
+      // does the real parsing.
+      if (msg.type === 'offer' || msg.type === 'answer') {
+        const sdp = msg.sdp;
+        if (!sdp || typeof sdp !== 'object' || typeof sdp.type !== 'string' || typeof sdp.sdp !== 'string') {
+          logger.warn('SignalingServer', 'malformed sdp dropped', { type: msg.type, from: clientId });
+          return;
+        }
+      } else {
+        const cand = msg.candidate;
+        // Candidate can legitimately be null (end-of-candidates), but if
+        // present must be an object with a string `candidate` field.
+        if (cand !== null && (typeof cand !== 'object' || typeof cand.candidate !== 'string')) {
+          logger.warn('SignalingServer', 'malformed ice_candidate dropped', { from: clientId });
+          return;
+        }
+      }
       _send(msg.to, { ...msg, from: clientId });
       break;
     }
