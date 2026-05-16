@@ -15,11 +15,21 @@ export function useGroupStore() {
   const addPeer = useCallback((peer) => {
     setPeers((prev) => {
       const existing = prev.find((p) => p.id === peer.id);
+      // Order matters: defaults < new peer payload < existing live state.
+      // peer_joined / peer_list carry speaking:false by convention, so a
+      // rejoin event would otherwise clobber a real speaking:true for one
+      // poll tick (~300ms) and flicker the UI. Keeping `...existing` last
+      // preserves the live speaking/connectionState until the WebRTC layer
+      // updates them through their dedicated setters.
       const merged = {
         connectionState: 'connecting',
         speaking: false,
-        ...existing,
         ...peer,
+        ...existing,
+        // Always honor the latest name from the payload — that's the one
+        // field the signaling server is authoritative about across rejoins.
+        name: peer.name ?? existing?.name,
+        id: peer.id,
       };
       return [...prev.filter((p) => p.id !== peer.id), merged];
     });

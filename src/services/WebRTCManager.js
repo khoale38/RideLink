@@ -7,6 +7,55 @@
  * owns its pc, timers, watchdog, ICE-candidate buffer, and restart counter —
  * so teardown is a single map delete and identity checks reduce to
  * `_isFresh(id, entry)` rather than tracking pcs across multiple parallel maps.
+ *
+ * ----------------------------------------------------------------------------
+ * Build-specific workarounds (do NOT delete without re-testing the listed
+ * scenarios on the bumped react-native-webrtc version).
+ * ----------------------------------------------------------------------------
+ *
+ * 1. `_localStatsPc` / `_buildLocalStatsPc` loopback PeerConnection pair.
+ *    REASON: react-native-webrtc on iOS does not populate `media-source`
+ *    audioLevel in getStats() unless the local SDP has a matching remote
+ *    answer. Without a peer, a solo host's "speaking" indicator stays dark
+ *    and VOX calibration never completes.
+ *    REMEDY: handshake against an in-process companion pc so the stats path
+ *    is hot. The companion's received track is muted twice (event-time AND
+ *    via getReceivers pre-loop) because some builds start auto-playing
+ *    decoded audio between setLocalDescription(answer) and the 'track'
+ *    event firing, causing the rider to hear themselves.
+ *    RETIREMENT CHECK: solo-host VOX lights up with a single pc and only
+ *    setLocalDescription called.
+ *
+ * 2. `oniceconnectionstatechange` driving `onPeerState('connected')` and
+ *    resetting `restartAttempts`.
+ *    REASON: on some react-native-webrtc builds `connectionState` parks in
+ *    'connecting' even when ICE has actually reached 'connected' and media
+ *    is flowing. Without this, the UI badge stays yellow forever and the
+ *    ICE-restart backoff keeps climbing despite each restart making partial
+ *    progress.
+ *    RETIREMENT CHECK: end-to-end connect cleanly advances connectionState
+ *    to 'connected' on both iOS and Android within the watchdog window.
+ *
+ * 3. Sibling-handler composition in `_bindSignalingHandlers`.
+ *    REASON: useIntercom installs handler functions on the shared
+ *    `handlers` object BEFORE the WebRTCManager is constructed; clobbering
+ *    them would silently break sibling listeners that the hook may add for
+ *    metrics or UI side effects.
+ *    RETIREMENT CHECK: not build-specific — this is a permanent
+ *    architectural constraint of the shared-handlers shape.
+ *
+ * 4. `pendingCandidates` buffer with preserved-across-rebuild semantics.
+ *    REASON: trickle ICE from a remote can race ahead of their SDP arrival
+ *    on slow links. The polite-glare path tears down and rebuilds the pc,
+ *    so naive deletion of the buffer would drop legitimate candidates.
+ *    Stale-ufrag candidates that survive the rebuild are rejected
+ *    non-fatally at flush time.
+ *    RETIREMENT CHECK: not build-specific — inherent to perfect negotiation
+ *    + trickle ICE.
+ *
+ * The PeerEntry constructor at line ~58 declares every per-peer field so a
+ * `git grep PeerEntry` from a future maintainer surfaces the full state
+ * surface without having to read every method that touches `entry.*`.
  */
 import {
   RTCPeerConnection,
@@ -55,6 +104,10 @@ class PeerEntry {
     this.speaking = false;
     this.restartAttempts = 0;
     this.candidateOverflowWarned = false;
+    // Latched true on the first stale-state answer log per entry. Stale
+    // answers are legitimate during fast ICE-restart churn, so we log once
+    // and stay quiet — see _handleAnswer.
+    this.staleAnswerLogged = false;
   }
 }
 

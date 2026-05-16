@@ -4,18 +4,20 @@ import { useGroupStore } from '../src/store/groupStore';
 // Minimal React.useCallback shim for the renderHook environment — handled
 // automatically by react-hooks testing lib + the react-native jest preset.
 
-test('addPeer merges existing peer, preserves connectionState', () => {
+test('addPeer preserves live state (connectionState + speaking) across a re-broadcast', () => {
+  // peer_joined / peer_list payloads from the signaling server carry stale
+  // defaults (speaking:false, no connectionState). When they re-broadcast
+  // for an already-known peer (server bookkeeping, reconnect replay),
+  // addPeer must NOT clobber the live state that the WebRTC layer has
+  // since pushed in via setPeerSpeaking / setPeerConnectionState — that
+  // would flicker the UI for one poll tick on every rebroadcast.
   const { result } = renderHook(() => useGroupStore());
 
-  act(() => {
-    result.current.addPeer({ id: 'p1', name: 'Alice', speaking: false });
-  });
-  act(() => {
-    result.current.setPeerConnectionState('p1', 'connected');
-  });
-  act(() => {
-    result.current.addPeer({ id: 'p1', name: 'Alice', speaking: true });
-  });
+  act(() => { result.current.addPeer({ id: 'p1', name: 'Alice' }); });
+  act(() => { result.current.setPeerConnectionState('p1', 'connected'); });
+  act(() => { result.current.setPeerSpeaking('p1', true); });
+  // Server re-broadcasts peer_joined with stale defaults — must not flicker.
+  act(() => { result.current.addPeer({ id: 'p1', name: 'Alice', speaking: false }); });
 
   expect(result.current.peers).toHaveLength(1);
   expect(result.current.peers[0]).toEqual(expect.objectContaining({
@@ -24,6 +26,18 @@ test('addPeer merges existing peer, preserves connectionState', () => {
     speaking: true,
     connectionState: 'connected',
   }));
+});
+
+test('addPeer updates name on re-broadcast (server is authoritative)', () => {
+  // Live state is preserved across re-broadcasts, but `name` is the one
+  // field the signaling server owns — a peer renaming themselves should
+  // surface immediately even though connectionState is preserved.
+  const { result } = renderHook(() => useGroupStore());
+  act(() => { result.current.addPeer({ id: 'p1', name: 'Alice' }); });
+  act(() => { result.current.setPeerConnectionState('p1', 'connected'); });
+  act(() => { result.current.addPeer({ id: 'p1', name: 'Alice-Renamed' }); });
+  expect(result.current.peers[0].name).toBe('Alice-Renamed');
+  expect(result.current.peers[0].connectionState).toBe('connected');
 });
 
 test('reset clears role, peers, hotspot info, but preserves myName', () => {
