@@ -437,7 +437,7 @@ const styles = StyleSheet.create({
     flexGrow: 1, backgroundColor: '#0d0d0d',
     alignItems: 'center', justifyContent: 'center', padding: 24,
   },
-  logo: { width: 120, height: 120, marginBottom: 8 },
+  logo: { width: 72, height: 72, marginBottom: 4, borderRadius: 16 },
   sub: { color: '#888', marginBottom: 40, fontSize: 14 },
   input: {
     width: '100%', borderWidth: 1, borderColor: '#333',
