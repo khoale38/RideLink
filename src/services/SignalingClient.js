@@ -59,6 +59,13 @@ export class SignalingClient {
   }
 
   _openSocket() {
+    // CONTRACT: callers must come through connect() unless they're the
+    // internal reconnect ladder. connect() resets `intentionallyClosed` and
+    // `gaveUp`; _openSocket does NOT. The reconnect ladder is safe because
+    // _scheduleReconnect short-circuits on both flags before scheduling a
+    // call here. If you ever add another caller, route it through connect()
+    // or it will succeed but the next disconnect won't auto-reconnect.
+    //
     // Drop listeners on any prior socket BEFORE reassigning this.socket.
     // disconnect() does this on the intentional path, but the reconnect
     // ladder reaches _openSocket without going through disconnect(); without

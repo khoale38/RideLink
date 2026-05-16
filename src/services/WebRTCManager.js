@@ -535,7 +535,16 @@ export class WebRTCManager {
     // tear down a healthy pc. Only apply when we actually have a pending
     // local offer; otherwise log non-fatally and keep the connection.
     if (entry.pc.signalingState !== 'have-local-offer') {
-      this._reportError('handleAnswer.staleState', new Error(`unexpected signalingState=${entry.pc.signalingState}`), msg.from, /* fatal */ false);
+      // Stale answers are legitimate during fast ICE-restart round trips
+      // (peer A sends new offer, peer B's old answer to A's prior offer
+      // races in afterward). Logging once per entry per session is enough
+      // to surface a genuine problem without spamming the journal under
+      // healthy churn. Was warn-every-time which produced N log lines per
+      // ICE restart and made real issues hard to spot.
+      if (!entry.staleAnswerLogged && __DEV__) {
+        entry.staleAnswerLogged = true;
+        console.warn('[WebRTC] handleAnswer ignored (stale state)', msg.from, entry.pc.signalingState);
+      }
       // The watchdog only guards the unanswered-local-offer deadlock. If
       // signalingState is anything else, it's no longer load-bearing —
       // leaving it armed would later tear down a healthy pc when the
@@ -645,6 +654,20 @@ export class WebRTCManager {
       const ice = pc.iceConnectionState;
       if (ice === 'connected' || ice === 'completed') {
         entry.restartAttempts = 0;
+        // Drive the UI badge from here too: if connectionState is genuinely
+        // parked in 'connecting' on this react-native-webrtc build (the bug
+        // this listener guards against), the connectionState branch will
+        // never fire 'connected' and the badge stays yellow forever even
+        // though media is flowing. Calling onPeerState here is idempotent
+        // when both states do fire — the embedding store ignores no-op
+        // transitions.
+        this.onPeerState?.(peerId, 'connected');
+        // Also a great moment to clear a stale _localStatsPc build-attempt
+        // budget: if loopback PC setup was failing transiently and we've
+        // since established a real peer, conditions for the next attempt
+        // are now demonstrably better. Without this, three early failures
+        // permanently disable solo-host VOX until app restart.
+        this._localStatsPcAttempts = 0;
       }
     };
 
@@ -664,6 +687,7 @@ export class WebRTCManager {
       } else if (state === 'connected') {
         this._clearDisconnectTimer(entry);
         entry.restartAttempts = 0; // healthy — reset backoff
+        this._localStatsPcAttempts = 0; // see oniceconnectionstatechange
         this.onPeerState?.(peerId, 'connected');
       } else if (state === 'disconnected' || state === 'failed') {
         this.onPeerState?.(peerId, 'connecting');

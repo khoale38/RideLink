@@ -618,6 +618,97 @@ test('disconnected ↔ failed flap honors shared backoff (does not reset to 5s g
   jest.useRealTimers();
 });
 
+test('disconnected→failed mid-grace-window recomputes delay with backoff (not stuck on 5s)', async () => {
+  // A fresh 'disconnected' arms a 5s grace timer. If the link transitions
+  // straight to 'failed' before the grace expires, the timer must be
+  // recomputed against the backoff schedule (here, base 500ms) rather than
+  // leaving the original 5s timer in place.
+  jest.useFakeTimers();
+  const pc = makePc();
+  RTCPeerConnection.mockImplementation(() => pc);
+  const signaling = makeSignaling();
+  const rtc = new WebRTCManager(signaling, jest.fn(), jest.fn(), jest.fn(), jest.fn());
+  rtc.setMyId('peer-z');
+  await rtc.callPeer('peer-a');
+  const entry = entryOf(rtc, 'peer-a');
+
+  pc.connectionState = 'disconnected';
+  pc.onconnectionstatechange();
+  // Grace is armed.
+  jest.advanceTimersByTime(1000);
+  expect(entry.disconnectTimer).not.toBeNull();
+
+  // Transition to 'failed' before the 5s grace expires. Backoff path with
+  // restartAttempts=0 → 500ms.
+  pc.connectionState = 'failed';
+  pc.onconnectionstatechange();
+  // The original grace timer must have been cleared and a fresh ~500ms one
+  // armed; advance past that to confirm it fires.
+  jest.advanceTimersByTime(600);
+  expect(entry.disconnectTimer).toBeNull();
+  rtc.destroy();
+  jest.useRealTimers();
+});
+
+test('iceConnectionState=connected reports onPeerState even if connectionState stays connecting', async () => {
+  // Regression guard for the UX bug: when connectionState is parked in
+  // 'connecting' but ICE has actually completed, the badge previously stayed
+  // yellow forever. The ICE-state listener now drives onPeerState too.
+  const pc = makePc();
+  RTCPeerConnection.mockImplementation(() => pc);
+  const signaling = makeSignaling();
+  const onPeerState = jest.fn();
+  const rtc = new WebRTCManager(signaling, jest.fn(), jest.fn(), onPeerState, jest.fn());
+  rtc.setMyId('peer-z');
+  await rtc.callPeer('peer-a');
+  onPeerState.mockClear();
+
+  pc.iceConnectionState = 'connected';
+  pc.oniceconnectionstatechange();
+  expect(onPeerState).toHaveBeenCalledWith('peer-a', 'connected');
+  rtc.destroy();
+});
+
+test('peer connect resets _localStatsPcAttempts so VOX can rebuild later', async () => {
+  // If loopback PC setup failed three times early on, the cap previously
+  // pinned solo-host VOX off until app restart. Once we actually establish
+  // a real peer, conditions have demonstrably improved; reset the budget.
+  const pc = makePc();
+  RTCPeerConnection.mockImplementation(() => pc);
+  const signaling = makeSignaling();
+  const rtc = new WebRTCManager(signaling, jest.fn(), jest.fn(), jest.fn(), jest.fn());
+  rtc.setMyId('peer-z');
+  await rtc.callPeer('peer-a');
+
+  rtc._localStatsPcAttempts = 3; // exhausted budget
+  pc.iceConnectionState = 'connected';
+  pc.oniceconnectionstatechange();
+  expect(rtc._localStatsPcAttempts).toBe(0);
+  rtc.destroy();
+});
+
+test('_handleAnswer stale-state warning fires once per entry, not every duplicate', async () => {
+  // Under fast ICE-restart churn, stale answers are legitimate. Logging on
+  // every occurrence drowns out real issues. Implementation guards via a
+  // per-entry flag; assert the warn only fires once.
+  const pc = makePc({ signalingState: 'stable' });
+  RTCPeerConnection.mockImplementation(() => pc);
+  const signaling = makeSignaling();
+  const rtc = new WebRTCManager(signaling, jest.fn(), jest.fn(), jest.fn(), jest.fn());
+  rtc.setMyId('peer-a');
+  await rtc.callPeer('peer-b');
+
+  const warn = jest.spyOn(console, 'warn').mockImplementation(() => {});
+  await rtc._handleAnswer({ from: 'peer-b', sdp: { type: 'answer', sdp: 'a1' } });
+  await rtc._handleAnswer({ from: 'peer-b', sdp: { type: 'answer', sdp: 'a2' } });
+  await rtc._handleAnswer({ from: 'peer-b', sdp: { type: 'answer', sdp: 'a3' } });
+
+  const staleCalls = warn.mock.calls.filter((c) => String(c[0]).includes('stale state'));
+  expect(staleCalls).toHaveLength(1);
+  warn.mockRestore();
+  rtc.destroy();
+});
+
 test('first disconnected (no prior attempts) uses 5s grace, not zero-delay backoff', async () => {
   // Counterpart guard: the grace period for a *fresh* disconnect must still
   // apply so a single brief radio drop doesn't immediately kick a restart.
