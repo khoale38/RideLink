@@ -53,6 +53,16 @@ export class SignalingClient {
   }
 
   _openSocket() {
+    // Drop listeners on any prior socket BEFORE reassigning this.socket.
+    // disconnect() does this on the intentional path, but the reconnect
+    // ladder reaches _openSocket without going through disconnect(); without
+    // this, a late 'close'/'error' from the previous socket can re-enter
+    // markDead on the healthy new instance and trigger duplicate reconnects.
+    if (this.socket) {
+      try { this.socket.removeAllListeners?.(); } catch (_) { /* ignore */ }
+      try { this.socket.destroy(); } catch (_) { /* ignore */ }
+      this.socket = null;
+    }
     return new Promise((resolve, reject) => {
       let settled = false;
       const finish = (err) => {

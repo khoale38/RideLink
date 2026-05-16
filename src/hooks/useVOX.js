@@ -172,6 +172,12 @@ export function useVOX(localStream, enabled = true, localLevelRef = null) {
       iosTimer = setInterval(tick, IOS_POLL_MS);
     } else {
       try {
+        // Recorder state lives on globalThis (survives Fast Refresh / hook
+        // remount). A prior session that didn't reach its cleanup — or an
+        // iOS↔Android platform flip on the same JS bundle — could leave
+        // `running` true; force-stop here so start() reliably re-arms the
+        // native capture rather than no-oping.
+        try { Recorder.stop(); } catch (_) { /* ignore */ }
         Recorder.configure({
           sampleRate: SAMPLE_RATE,
           channels: CHANNELS,

@@ -18,10 +18,20 @@ export function useIntercom(store, { onKicked } = {}) {
   // Latest onKicked callback kept in a ref so signaling handlers (bound once
   // per session) always see the current value without forcing a reconnect.
   const onKickedRef = useRef(onKicked);
-  useEffect(() => { onKickedRef.current = onKicked; });
+  useEffect(() => { onKickedRef.current = onKicked; }, [onKicked]);
   const signalingRef = useRef(null);
   const rtcRef = useRef(null);
   const hostingRef = useRef(false);
+  // Serialises session lifecycle calls. Tapping "Host" immediately after
+  // "Leave" used to race startSignalingServer against the still-closing
+  // listener (EADDRINUSE) — the lock makes the second call wait for the
+  // first to finish instead of relying on the bind-retry fallback.
+  const sessionLockRef = useRef(Promise.resolve());
+  const withSessionLock = (fn) => {
+    const next = sessionLockRef.current.then(() => fn(), () => fn());
+    sessionLockRef.current = next.catch(() => {});
+    return next;
+  };
   // Live 0..1 local mic level from WebRTC getStats. iOS useVOX polls this
   // because it can't open a parallel mic capture; Android ignores it and
   // reads PCM frames directly from RNAudioRecord instead.
@@ -63,9 +73,9 @@ export function useIntercom(store, { onKicked } = {}) {
     } catch (_) { /* best-effort */ }
   }, [store]);
 
-  const leaveGroup = useCallback(() => _cleanupSession(), [_cleanupSession]);
+  const leaveGroup = useCallback(() => withSessionLock(() => _cleanupSession()), [_cleanupSession]);
 
-  const hostGroup = useCallback(async (name) => {
+  const hostGroup = useCallback((name) => withSessionLock(async () => {
     try {
       const micOk = await requestMicPermission();
       if (!micOk) throw new Error('Microphone permission denied');
@@ -103,12 +113,12 @@ export function useIntercom(store, { onKicked } = {}) {
       // signaling client has joined — don't make the user wait for a guest.
       store.setConnected(true);
     } catch (err) {
-      await leaveGroup();
+      await _cleanupSession();
       throw err;
     }
-  }, [store, leaveGroup]);
+  }), [store, _cleanupSession]);
 
-  const joinGroup = useCallback(async (name, password) => {
+  const joinGroup = useCallback((name, password) => withSessionLock(async () => {
     try {
       if (Platform.OS === 'android') {
         const locationOk = await requestLocationPermission();
@@ -134,10 +144,10 @@ export function useIntercom(store, { onKicked } = {}) {
       const gateway = await resolveGatewayIP();
       await _connect(gateway, name, store, {});
     } catch (err) {
-      await leaveGroup();
+      await _cleanupSession();
       throw err;
     }
-  }, [store, leaveGroup]);
+  }), [store, _cleanupSession]);
 
   // Manual mute — store flag only. App.tsx owns the audio track state.
   const toggleMute = useCallback(() => {

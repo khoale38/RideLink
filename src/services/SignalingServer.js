@@ -198,7 +198,7 @@ function _cleanupClient(clientId, reason, onEvent) {
   const wasJoined = entry.joined;
   entry.joined = false;
   if (wasJoined) {
-    _broadcast({ type: 'peer_left', id: clientId, name: entry.name }, clientId);
+    _broadcast({ type: 'peer_left', id: clientId, name: entry.name }, clientId, onEvent);
     if (!entry.isHost) {
       onEvent?.({ type: 'peer_left', id: clientId, name: entry.name });
     }
@@ -243,7 +243,7 @@ function _handleMessage(clientId, msg, onEvent) {
         if (id !== clientId && c.name) peers.push({ id, name: c.name });
       });
       _send(clientId, { type: 'peer_list', peers, yourId: clientId }, onEvent);
-      _broadcast({ type: 'peer_joined', id: clientId, name: msg.name }, clientId);
+      _broadcast({ type: 'peer_joined', id: clientId, name: msg.name }, clientId, onEvent);
       // Skip notifying the local listener about the host's own loopback
       // connection — the host already represents itself in the UI.
       if (!entry.isHost) {
@@ -309,16 +309,18 @@ function _send(clientId, msg, onEvent) {
   }
 }
 
-function _broadcast(msg, excludeId) {
+function _broadcast(msg, excludeId, onEvent) {
   // Only joined clients receive broadcasts. A half-open socket that hasn't
   // sent `join` yet has no business seeing peer_joined/peer_left/etc.
   //
-  // Note: _send is called here without an `onEvent` callback. If a broadcast
-  // write fails, we still cleanup the target client, but the host-side
-  // onEvent notification for that recursive peer_left is skipped to avoid
-  // re-entrant fan-out during the outer broadcast loop. The next socket
-  // 'close' event for that client will deliver the host-side notification.
+  // Two-pass: snapshot the recipient ids first so a re-entrant _cleanupClient
+  // (triggered by a failing _send) can't mutate the map mid-iteration. The
+  // recursive peer_left broadcast issued by that cleanup is then defer-safe.
+  const targets = [];
   clients.forEach((entry, id) => {
-    if (id !== excludeId && entry.joined) _send(id, msg);
+    if (id !== excludeId && entry.joined) targets.push(id);
   });
+  for (const id of targets) {
+    if (clients.has(id)) _send(id, msg, onEvent);
+  }
 }
