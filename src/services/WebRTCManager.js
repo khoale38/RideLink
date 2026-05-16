@@ -16,6 +16,12 @@ const RTC_CONFIG = {
   iceTransportPolicy: 'all',
 };
 
+// Offer watchdog deadline. Must exceed the signaling client's CONNECT_TIMEOUT_MS
+// (10s) plus a generous answer round-trip — otherwise a signaling reconnect
+// underneath an in-flight negotiation can churn pcs back-to-back as the
+// watchdog tears them down faster than the new socket can carry the answer.
+const OFFER_WATCHDOG_MS = 20000;
+
 export class WebRTCManager {
   constructor(signalingClient, onVoiceActivity, onError, onPeerState, onLocalVoiceActivity, onLocalAudioLevel) {
     this.signaling = signalingClient;
@@ -138,6 +144,13 @@ export class WebRTCManager {
 
   // Called by useIntercom after the signaling server replies with our id.
   // Required for offer-glare resolution; until it's set we behave as impolite.
+  //
+  // Ordering contract: peer_list handler MUST call setMyId BEFORE iterating
+  // peers to call callPeer(). Otherwise the new pcs would be created without
+  // a glare tie-break id, and any incoming offer racing in would queue into
+  // pendingOffers and never replay (because callPeer's offer is already on
+  // the wire). resetPeers() nulls myId so a reconnect re-establishes this
+  // ordering naturally.
   setMyId(id) {
     this.myId = id;
     if (this.pendingOffers.length) {
@@ -171,6 +184,13 @@ export class WebRTCManager {
   // webrtc on iOS doesn't fill them when only setLocalDescription is called
   // without a matching remote answer. This is the same trick the mic test
   // uses and is what lets a solo host's "speaking" indicator light up.
+  //
+  // RETIREMENT: this workaround targets a specific react-native-webrtc bug.
+  // When that dep is bumped, re-test solo-host VOX with this whole loopback
+  // pair removed — if `media-source` audioLevel is now populated from a
+  // single pc with only setLocalDescription, delete _ensureLocalStatsPc /
+  // _buildLocalStatsPc / _localStatsPc* entirely and just call getStats()
+  // on a peer pc (or a single dummy pc) directly.
   async _ensureLocalStatsPc() {
     if (this._localStatsPc || !this.localStream || this.destroyed) return;
     // In-flight guard: concurrent startLocalAudio calls (e.g. reconnect race)
@@ -292,7 +312,7 @@ export class WebRTCManager {
       if (__DEV__) console.warn('[WebRTC] offer watchdog: tearing down stuck pc for', peerId);
       this._reportError('offerWatchdog', new Error('offer unanswered, tearing down'), peerId, /* fatal */ false);
       this._removePeer(peerId);
-    }, 15000);
+    }, OFFER_WATCHDOG_MS);
     this.offerWatchdogs.set(peerId, t);
   }
 
@@ -375,7 +395,18 @@ export class WebRTCManager {
       // answerer here, so signalingState moves stable→have-remote-offer→
       // stable without ever sitting in have-local-offer. The watchdog only
       // guards the unanswered-local-offer deadlock.
+      //
+      // Preserve any ICE candidates buffered for THIS peer across the
+      // rebuild: trickle from the remote can race ahead of their offer's
+      // SDP arrival, and _removePeer would otherwise wipe them right before
+      // we stand up the new pc. Candidates with stale ufrag from a prior
+      // session will be rejected by the WebRTC stack on flush (logged
+      // non-fatally), so the worst case is a few harmless warnings.
+      const preservedCandidates = this.pendingCandidates.get(msg.from);
       this._removePeer(msg.from);
+      if (preservedCandidates && preservedCandidates.length) {
+        this.pendingCandidates.set(msg.from, preservedCandidates);
+      }
     }
 
     const pc = this._createPeerConnection(msg.from);
@@ -404,6 +435,11 @@ export class WebRTCManager {
     // local offer; otherwise log non-fatally and keep the connection.
     if (pc.signalingState !== 'have-local-offer') {
       this._reportError('handleAnswer.staleState', new Error(`unexpected signalingState=${pc.signalingState}`), msg.from, /* fatal */ false);
+      // If negotiation already settled via another path (stable), the watchdog
+      // is no longer guarding anything — leaving it armed would later tear
+      // down a healthy pc when the deadline fires. Clear it here so the
+      // "stale answer arrived after we already converged" case is benign.
+      if (pc.signalingState === 'stable') this._clearOfferWatchdog(msg.from);
       return;
     }
     try {
@@ -426,6 +462,12 @@ export class WebRTCManager {
     if (!pc.remoteDescription) {
       const queue = this.pendingCandidates.get(msg.from) ?? [];
       // Bound the queue — a misbehaving peer shouldn't pin memory.
+      // The queue can also straddle SDP epochs across a polite-glare rebuild
+      // (we deliberately preserve it in _handleOffer so trickle isn't lost).
+      // Stale-epoch candidates have a mismatched ufrag and will be rejected
+      // by addIceCandidate at flush time — _flushPendingCandidates routes
+      // those errors through _reportError with fatal=false, so the worst case
+      // is a few benign warnings, not a torn-down connection.
       const MAX_PENDING_CANDIDATES = 64;
       if (queue.length >= MAX_PENDING_CANDIDATES) queue.shift();
       queue.push(msg.candidate);

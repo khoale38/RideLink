@@ -68,7 +68,8 @@ test('connect() after gave_up resets reconnect counter so the instance is reusab
   await client.connect();
 
   // Force the gave_up path: pretend we've already burned MAX attempts.
-  client.reconnectAttempt = 5;
+  // Kept in sync with MAX_RECONNECT_ATTEMPTS in SignalingClient.
+  client.reconnectAttempt = 10;
   client._scheduleReconnect.call?.(client); // no-op if private; call internal directly
   // Drive it deterministically:
   client.everConnected = true;

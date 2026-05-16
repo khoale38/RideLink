@@ -211,7 +211,7 @@ test('offer watchdog tears down a pc that never receives an answer', async () =>
 
   // Fast-forward past the watchdog window. The pc is still in
   // 'have-local-offer' → watchdog fires → peer removed.
-  jest.advanceTimersByTime(16000);
+  jest.advanceTimersByTime(21000);
   expect(pc.close).toHaveBeenCalled();
   expect(rtc.peers.has('peer-a')).toBe(false);
   rtc.destroy();
@@ -253,6 +253,62 @@ test('glare: lexicographically larger id is impolite and ignores incoming offer'
   expect(existing.close).not.toHaveBeenCalled();
   expect(signaling.send).not.toHaveBeenCalled();
   rtc.destroy();
+});
+
+test('polite-glare rebuild preserves ICE candidates buffered before the new offer arrives', async () => {
+  // Race: candidate from remote arrives → buffered. Then their offer arrives
+  // while we already have a local-offer pc (glare). On the polite path we
+  // tear down and rebuild — the buffered candidates must survive the rebuild
+  // so trickle isn't lost.
+  const existing = makePc({ signalingState: 'have-local-offer' });
+  const fresh = makePc();
+  fresh.remoteDescription = null;
+  fresh.setRemoteDescription = jest.fn(async (sdp) => { fresh.remoteDescription = sdp; });
+  RTCPeerConnection
+    .mockImplementationOnce(() => existing)
+    .mockImplementationOnce(() => fresh);
+  const signaling = makeSignaling();
+  const rtc = new WebRTCManager(signaling, jest.fn(), jest.fn(), jest.fn(), jest.fn());
+  rtc.setMyId('peer-a'); // polite vs peer-b
+  await rtc.callPeer('peer-b');
+
+  // Trickle ICE arrives while we still only have a local offer (no remote
+  // SDP yet) — gets buffered against the existing pc.
+  await rtc._handleIceCandidate({ from: 'peer-b', candidate: { candidate: 'c1', sdpMLineIndex: 0 } });
+  expect(rtc.pendingCandidates.get('peer-b')).toHaveLength(1);
+
+  // Now their offer lands — polite path tears down `existing` and rebuilds.
+  await rtc._handleOffer({ from: 'peer-b', sdp: { type: 'offer', sdp: 'remote' } });
+
+  // Fresh pc must have had the buffered candidate replayed against it.
+  expect(fresh.setRemoteDescription).toHaveBeenCalled();
+  expect(fresh.addIceCandidate).toHaveBeenCalledTimes(1);
+  expect(rtc.pendingCandidates.has('peer-b')).toBe(false);
+  rtc.destroy();
+});
+
+test('_handleAnswer clears watchdog when negotiation already settled to stable', async () => {
+  jest.useFakeTimers();
+  const pc = makePc({ signalingState: 'stable' });
+  RTCPeerConnection.mockImplementation(() => pc);
+  const signaling = makeSignaling();
+  const rtc = new WebRTCManager(signaling, jest.fn(), jest.fn(), jest.fn(), jest.fn());
+  rtc.setMyId('peer-z');
+  await rtc.callPeer('peer-a');
+  // Watchdog is armed by callPeer; pc is now (artificially) stable, simulating
+  // that another path already converged the negotiation.
+  expect(rtc.offerWatchdogs.has('peer-a')).toBe(true);
+
+  await rtc._handleAnswer({ from: 'peer-a', sdp: { type: 'answer', sdp: 'late' } });
+
+  // Stale-state path must have cleared the watchdog — otherwise it would
+  // later fire and tear down a healthy pc.
+  expect(rtc.offerWatchdogs.has('peer-a')).toBe(false);
+  jest.advanceTimersByTime(30000);
+  expect(pc.close).not.toHaveBeenCalled();
+  expect(rtc.peers.has('peer-a')).toBe(true);
+  rtc.destroy();
+  jest.useRealTimers();
 });
 
 test('impolite glare re-arms offer watchdog so a slow polite-peer answer can still land', async () => {

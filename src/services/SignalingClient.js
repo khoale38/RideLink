@@ -14,13 +14,14 @@ import { logger } from './logger';
 
 const CONNECT_TIMEOUT_MS = 10000;
 const RECONNECT_BASE_MS = 1000;
-const RECONNECT_MAX_MS = 15000;
+const RECONNECT_MAX_MS = 30000;
 const MAX_BUFFER_BYTES = 64 * 1024;
 const MAX_LINE_BYTES = 32 * 1024;
 // Give up after this many consecutive reconnect failures. With exponential
-// backoff (1,2,4,8,15s) this is roughly 30s of trying before we surface
-// "host is gone" to the UI instead of spinning forever.
-const MAX_RECONNECT_ATTEMPTS = 5;
+// backoff capped at 30s (1,2,4,8,16,30,30,30,30,30) this is roughly ~2.5
+// minutes of trying — long enough to survive a real-world motorcycle
+// tunnel without forcing the rider to manually rejoin on the other side.
+const MAX_RECONNECT_ATTEMPTS = 10;
 
 export class SignalingClient {
   constructor(host, port, handlers) {
