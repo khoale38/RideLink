@@ -216,10 +216,18 @@ export function stopSignalingServer() {
     // at 1s so leaveGroup never hangs.
     setTimeout(done, 1000);
   });
-  pendingStop = stopPromise;
+  // Chain onto any existing pendingStop so a rapid stop→start→stop cascade
+  // serializes correctly — overwriting pendingStop unconditionally would
+  // let the new gate clear before the prior drain finishes, defeating
+  // the start-after-stop ordering.
+  const chained = pendingStop
+    ? pendingStop.then(() => stopPromise, () => stopPromise)
+    : stopPromise;
+  pendingStop = chained;
   // Clear the gate once draining completes so the next start can run
-  // synchronously again.
-  stopPromise.then(() => { if (pendingStop === stopPromise) pendingStop = null; });
+  // synchronously again. Identity check so a subsequent stop installed
+  // on top of this one isn't cleared by our late callback.
+  chained.then(() => { if (pendingStop === chained) pendingStop = null; });
   return stopPromise;
 }
 

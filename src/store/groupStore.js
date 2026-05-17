@@ -57,8 +57,16 @@ export function useGroupStore() {
       // poll tick (~300ms) and flicker the UI. Keeping `...existing` last
       // preserves the live speaking/connectionState until the WebRTC layer
       // updates them through their dedicated setters.
+      // Re-joins must NOT inherit a stale 'failed' state. If a peer_left
+      // was missed (rare server-side race), `...existing` would otherwise
+      // surface the prior session's 'failed' badge until the new pc
+      // handshake updates it. Clamp 'failed' back to 'connecting' on
+      // every (re)broadcast — the WebRTC layer pushes the real state
+      // through setPeerConnectionState within a tick of the new pc.
+      const liveConnState = existing?.connectionState === 'failed'
+        ? 'connecting'
+        : (existing?.connectionState ?? 'connecting');
       const merged = {
-        connectionState: 'connecting',
         speaking: false,
         ...peer,
         ...existing,
@@ -66,6 +74,7 @@ export function useGroupStore() {
         // field the signaling server is authoritative about across rejoins.
         name: peer.name ?? existing?.name,
         id: peer.id,
+        connectionState: liveConnState,
       };
       return [...prev.filter((p) => p.id !== peer.id), merged];
     });

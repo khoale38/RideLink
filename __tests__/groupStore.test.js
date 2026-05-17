@@ -89,6 +89,18 @@ test('setPeerConnectionState preserves the peers array reference when value is u
   expect(result.current.peers).toBe(ref1);
 });
 
+test('addPeer clamps a stale failed connectionState back to connecting on re-broadcast', () => {
+  // If a peer_left was missed (rare server-side race), a peer_joined for
+  // the same id must not surface the old 'failed' badge — the new pc is
+  // about to negotiate from scratch.
+  const { result } = renderHook(() => useGroupStore());
+  act(() => { result.current.addPeer({ id: 'p1', name: 'Alice' }); });
+  act(() => { result.current.setPeerConnectionState('p1', 'failed'); });
+  expect(result.current.peers[0].connectionState).toBe('failed');
+  act(() => { result.current.addPeer({ id: 'p1', name: 'Alice' }); });
+  expect(result.current.peers[0].connectionState).toBe('connecting');
+});
+
 test('removePeer is a no-op for unknown ids', () => {
   const { result } = renderHook(() => useGroupStore());
   act(() => { result.current.addPeer({ id: 'p1', name: 'Alice' }); });

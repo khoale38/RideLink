@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useCallback, useMemo } from 'react';
 import {
   View, Text, TouchableOpacity, FlatList, StyleSheet,
   Platform, Switch,
@@ -30,6 +30,52 @@ const STATE_COLOR = {
   connected: '#4caf50',
   failed: '#c0392b',
 };
+
+// Memoized row so a peer whose `speaking` / `connectionState` didn't change
+// skips re-render when the speaking-poll updates a sibling. Without this,
+// the FlatList rebuilds every row on every ~300ms tick — wasteful at 5+
+// riders, and the rebuild kills the gentle border animation.
+const RiderRow = React.memo(function RiderRow({ item }) {
+  const state = item.connectionState;
+  const label = !item.isMe && state ? STATE_LABEL[state] : null;
+  const color = !item.isMe && state ? STATE_COLOR[state] : null;
+  return (
+    <View style={[styles.riderRow, item.speaking && styles.riderRowSpeaking]}>
+      <View style={[styles.avatar, item.speaking && styles.avatarSpeaking]}>
+        <Text style={styles.avatarText}>{item.name?.[0]?.toUpperCase()}</Text>
+      </View>
+      <View style={styles.riderInfo}>
+        <Text style={styles.riderName}>{item.name}</Text>
+        {label && (
+          <Text style={[styles.riderStatus, { color }]}>{label}</Text>
+        )}
+      </View>
+    </View>
+  );
+});
+
+function RiderList({ myName, peers, isSpeaking }) {
+  // Memoize the data array so the FlatList sees a stable reference when
+  // unrelated state churns (mute toggle, VOX slider). The dep set is
+  // exactly the inputs to the array shape.
+  const data = useMemo(
+    () => [
+      { id: 'me', name: `${myName} (you)`, speaking: isSpeaking, isMe: true },
+      ...peers,
+    ],
+    [myName, isSpeaking, peers],
+  );
+  const renderItem = useCallback(({ item }) => <RiderRow item={item} />, []);
+  const keyExtractor = useCallback((item) => item.id, []);
+  return (
+    <FlatList
+      data={data}
+      keyExtractor={keyExtractor}
+      style={styles.list}
+      renderItem={renderItem}
+    />
+  );
+}
 
 export function GroupScreen({ store, vox, voxEnabled, onToggleVox, onMuteToggle, onLeave }) {
   const { myName, peers, muted, role, connected, hotspotPassword, hotspotSsid, selfSpeaking } = store;
@@ -89,32 +135,7 @@ export function GroupScreen({ store, vox, voxEnabled, onToggleVox, onMuteToggle,
           Audio may degrade above {MESH_SOFT_LIMIT} riders — WebRTC mesh scales O(N²).
         </Text>
       )}
-      <FlatList
-        data={[
-          { id: 'me', name: `${myName} (you)`, speaking: isSpeaking, isMe: true },
-          ...peers,
-        ]}
-        keyExtractor={(item) => item.id}
-        style={styles.list}
-        renderItem={({ item }) => {
-          const state = item.connectionState;
-          const label = !item.isMe && state ? STATE_LABEL[state] : null;
-          const color = !item.isMe && state ? STATE_COLOR[state] : null;
-          return (
-            <View style={[styles.riderRow, item.speaking && styles.riderRowSpeaking]}>
-              <View style={[styles.avatar, item.speaking && styles.avatarSpeaking]}>
-                <Text style={styles.avatarText}>{item.name?.[0]?.toUpperCase()}</Text>
-              </View>
-              <View style={styles.riderInfo}>
-                <Text style={styles.riderName}>{item.name}</Text>
-                {label && (
-                  <Text style={[styles.riderStatus, { color }]}>{label}</Text>
-                )}
-              </View>
-            </View>
-          );
-        }}
-      />
+      <RiderList myName={myName} peers={peers} isSpeaking={isSpeaking} />
 
       {/* VOX settings */}
       <View style={styles.voxSettings}>
@@ -125,6 +146,8 @@ export function GroupScreen({ store, vox, voxEnabled, onToggleVox, onMuteToggle,
             onValueChange={onToggleVox}
             trackColor={{ true: '#f5a623' }}
             thumbColor="#fff"
+            accessibilityLabel="Voice-activated transmit toggle"
+            accessibilityRole="switch"
           />
         </View>
         {voxEnabled && (
@@ -139,6 +162,8 @@ export function GroupScreen({ store, vox, voxEnabled, onToggleVox, onMuteToggle,
                 style={[styles.recalBtn, vox.calibrating && styles.recalBtnActive]}
                 onPress={vox.recalibrate}
                 disabled={vox.calibrating}
+                accessibilityRole="button"
+                accessibilityLabel={vox.calibrating ? 'Calibrating voice activation' : 'Auto-calibrate voice activation'}
               >
                 <Text style={styles.recalBtnText}>
                   {vox.calibrating ? 'Listening…' : 'Auto-calibrate'}
@@ -163,6 +188,8 @@ export function GroupScreen({ store, vox, voxEnabled, onToggleVox, onMuteToggle,
               maximumTrackTintColor="#333"
               thumbTintColor="#f5a623"
               disabled={vox.calibrating}
+              accessibilityLabel="Voice activation sensitivity"
+              accessibilityValue={{ min: -60, max: -20, now: Math.round(vox.thresholdDb), text: `${Math.round(vox.thresholdDb)} decibels` }}
             />
           </View>
         )}
@@ -173,12 +200,20 @@ export function GroupScreen({ store, vox, voxEnabled, onToggleVox, onMuteToggle,
         <TouchableOpacity
           style={[styles.controlBtn, muted && styles.controlBtnMuted]}
           onPress={onMuteToggle}
+          accessibilityRole="button"
+          accessibilityLabel={muted ? 'Unmute microphone' : 'Mute microphone'}
+          accessibilityState={{ checked: muted }}
         >
           <Text style={styles.controlIcon}>{muted ? '🔇' : '🎙️'}</Text>
           <Text style={styles.controlLabel}>{muted ? 'Unmute' : 'Mute'}</Text>
         </TouchableOpacity>
 
-        <TouchableOpacity style={[styles.controlBtn, styles.controlBtnLeave]} onPress={onLeave}>
+        <TouchableOpacity
+          style={[styles.controlBtn, styles.controlBtnLeave]}
+          onPress={onLeave}
+          accessibilityRole="button"
+          accessibilityLabel="Leave the group ride"
+        >
           <Text style={styles.controlIcon}>📵</Text>
           <Text style={styles.controlLabel}>Leave</Text>
         </TouchableOpacity>

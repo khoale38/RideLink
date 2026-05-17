@@ -94,6 +94,18 @@ export class SignalingClient {
         this.socket = TcpSocket.createConnection(
           { host: this.host, port: this.port },
           () => {
+            // If the caller disconnected between scheduling and resolving
+            // (or the reconnect ladder gave up), abandon the socket — don't
+            // replay the join into a session the caller has already torn
+            // down. disconnect() already destroyed the prior socket, but a
+            // freshly-opened socket here would otherwise be orphaned.
+            if (this.intentionallyClosed || this.gaveUp) {
+              try { this.socket?.removeAllListeners?.(); } catch (_) { /* ignore */ }
+              try { this.socket?.destroy(); } catch (_) { /* ignore */ }
+              this.socket = null;
+              finish(new Error('connect resolved after disconnect — abandoning'));
+              return;
+            }
             this.connected = true;
             this.reconnectAttempt = 0;
             const wasReconnect = this.everConnected;

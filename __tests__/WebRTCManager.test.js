@@ -794,7 +794,9 @@ test('preserved candidate buffer is capped on glare rebuild', async () => {
   const existing = makePc({ signalingState: 'have-local-offer' });
   const fresh = makePc();
   RTCPeerConnection.mockImplementation(() => {
-    return existing.signalingState === 'have-local-offer' && !fresh._used ? existing : (fresh._used = true, fresh);
+    if (existing.signalingState === 'have-local-offer' && !fresh._used) return existing;
+    fresh._used = true;
+    return fresh;
   });
   const signaling = makeSignaling();
   const rtc = new WebRTCManager(signaling, jest.fn(), jest.fn(), jest.fn(), jest.fn());

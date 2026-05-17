@@ -266,8 +266,9 @@ export class WebRTCManager {
   // peers to call callPeer(). Otherwise the new pcs would be created without
   // a glare tie-break id, and any incoming offer racing in would queue into
   // pendingOffers and never replay (because callPeer's offer is already on
-  // the wire). resetPeers() nulls myId so a reconnect re-establishes this
-  // ordering naturally.
+  // the wire). resetPeers() nulls myId AND clears pendingOffers so a
+  // signaling reconnect re-establishes this ordering naturally without
+  // replaying a stale buffer from the prior session.
   setMyId(id) {
     this.myId = id;
     if (this.pendingOffers.length) {
@@ -276,12 +277,20 @@ export class WebRTCManager {
       // Serialize the replay so a fast real-time offer that races in while
       // we're applying a buffered one can't interleave setRemoteDescription
       // / createAnswer awaits on the same pc. Each replay completes before
-      // the next starts; any live offer arriving meanwhile is handled by
-      // the regular handlers.offer wrapper after this chain resolves.
+      // the next starts. Live offers arriving during the replay are routed
+      // onto the same chain via _handleOffer's `_replayChain` check below —
+      // without that hand-off, a live offer could parallel-race the buffered
+      // one for the same peer on the same pc.
       this._replayChain = queued.reduce(
-        (p, msg) => p.then(() => this._handleOffer(msg)).catch(() => {}),
+        (p, msg) => p.then(() => this._handleOffer(msg, { fromReplay: true })).catch(() => {}),
         Promise.resolve(),
       );
+      // Resolve _replayChain to null when complete so destroy() can stop
+      // awaiting it and live-offer routing falls back to the direct path.
+      const finalize = this._replayChain;
+      finalize.then(() => {
+        if (this._replayChain === finalize) this._replayChain = null;
+      });
     }
   }
 
@@ -545,10 +554,20 @@ export class WebRTCManager {
     return !!cand && typeof cand === 'object' && typeof cand.candidate === 'string';
   }
 
-  async _handleOffer(msg) {
+  async _handleOffer(msg, opts = {}) {
     if (this.destroyed) return;
     if (!this._isValidSdpMsg(msg)) {
       this._reportError('handleOffer.shape', new Error('malformed offer payload'), msg?.from, /* fatal */ false);
+      return;
+    }
+    // If a replay chain is currently draining (buffered offers from before
+    // setMyId), route live offers onto the same chain. Without this a live
+    // offer for the same peer could parallel-race a buffered one's awaits
+    // on the same pc. `fromReplay` short-circuits the recursion when the
+    // chain itself is invoking us.
+    if (this._replayChain && !opts.fromReplay) {
+      const chain = this._replayChain;
+      this._replayChain = chain.then(() => this._handleOffer(msg, { fromReplay: true })).catch(() => {});
       return;
     }
 
@@ -962,14 +981,32 @@ export class WebRTCManager {
     if (this._tickRunning) {
       try { await this._tickRunning; } catch (_) { /* tick swallows its own errors */ }
     }
+    // Symmetric with _tickRunning: the buffered-offer replay chain (built in
+    // setMyId) holds references to _handleOffer that could still wake up
+    // pcs we're about to close. Each replay early-exits on destroyed=true,
+    // but awaiting here lets the chain settle deterministically.
+    if (this._replayChain) {
+      try { await this._replayChain; } catch (_) { /* replay errors are swallowed */ }
+      this._replayChain = null;
+    }
     this.peers.forEach((entry) => {
       entry.closed = true;
       if (entry.disconnectTimer) clearTimeout(entry.disconnectTimer);
       if (entry.offerWatchdog) clearTimeout(entry.offerWatchdog);
+      // Null the trickle handler before close so any trailing native
+      // gatherer events can't fire signaling.send() on a closed pc.
+      try { entry.pc.onicecandidate = null; } catch (_) { /* ignore */ }
       try { entry.pc.close(); } catch (_) { /* already closed */ }
     });
     this.peers.clear();
     this.pendingOffers = [];
+    // Closing the loopback pair is best-effort — both sides are torn down
+    // here, so any trailing ICE candidate from one pc would land on the
+    // already-closed other pc and be swallowed by the try/catch in
+    // _buildLocalStatsPc's icecandidate listener. The listeners themselves
+    // were attached via addEventListener (not the on* property) so they
+    // can't be detached without a stored ref; the close() call below tells
+    // the native gatherer to stop, which is the canonical cleanup.
     if (this._localStatsPc) {
       try { this._localStatsPc.close(); } catch (_) { /* already closed */ }
       this._localStatsPc = null;

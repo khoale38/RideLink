@@ -4,7 +4,6 @@ import { SignalingClient } from '../services/SignalingClient';
 import { WebRTCManager } from '../services/WebRTCManager';
 import { startSignalingServer, stopSignalingServer, SIGNALING_PORT } from '../services/SignalingServer';
 import {
-  resolveGatewayIP,
   resolveGatewayIPVerbose,
   requestLocationPermission,
   requestMicPermission,
@@ -53,7 +52,13 @@ export function useIntercom(store, { onKicked } = {}) {
     // Disconnect signaling FIRST so any in-flight handlers (offer/answer/ice)
     // can't call into a half-destroyed WebRTC manager.
     try { signalingRef.current?.disconnect(); } catch (_) { /* ignore */ }
-    try { rtcRef.current?.destroy(); } catch (_) { /* ignore */ }
+    // destroy() is async (it awaits any in-flight stats tick + replay chain
+    // so trailing safeNotify calls can't fire into a torn-down store). Kick
+    // it off here and include the promise in the awaited Promise.all below
+    // so an immediate re-host doesn't race a still-running tick into the
+    // unmounted React tree.
+    let destroyRtc = Promise.resolve();
+    try { destroyRtc = rtcRef.current?.destroy() ?? Promise.resolve(); } catch (_) { /* ignore */ }
     let stopServer = Promise.resolve();
     if (hostingRef.current) {
       try { stopServer = stopSignalingServer(); } catch (_) { /* ignore */ }
@@ -73,6 +78,7 @@ export function useIntercom(store, { onKicked } = {}) {
     // (which would otherwise throw EADDRINUSE on the next bind).
     try {
       await Promise.all([
+        destroyRtc,
         stopServer,
         stopIntercomService(),
         stopLocalHotspot(),
@@ -123,6 +129,11 @@ export function useIntercom(store, { onKicked } = {}) {
       await _cleanupSession();
       throw err;
     }
+    // _connect is defined as a function declaration in the hook scope and
+    // is stable across renders; including it in the deps would force the
+    // ref-identity of hostGroup/joinGroup to churn and would invalidate
+    // any downstream useEffect deps that watch them.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }), [store, _cleanupSession]);
 
   const joinGroup = useCallback((name, password) => withSessionLock(async () => {
@@ -162,6 +173,8 @@ export function useIntercom(store, { onKicked } = {}) {
       await _cleanupSession();
       throw err;
     }
+    // See hostGroup above for the _connect dep rationale.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }), [store, _cleanupSession]);
 
   // Manual mute — store flag only. App.tsx owns the audio track state.

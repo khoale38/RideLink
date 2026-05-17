@@ -7,6 +7,7 @@ import { GroupScreen } from './src/screens/GroupScreen';
 import { useGroupStore } from './src/store/groupStore';
 import { useIntercom } from './src/hooks/useIntercom';
 import { useVOX } from './src/hooks/useVOX';
+import { ErrorBoundary } from './src/components/ErrorBoundary';
 
 function App() {
   const store = useGroupStore();
@@ -14,7 +15,7 @@ function App() {
     onKicked: async (reason: 'host_closed_room' | 'connection_lost') => {
       // Await teardown so a user tapping Host/Join immediately after the alert
       // dismisses doesn't race a still-running signaling server / FG service.
-      try { await leaveGroup(); } catch (_) { /* best-effort */ }
+      try { await leaveGroup(); } catch { /* best-effort */ }
       setScreen('home');
       Alert.alert(
         reason === 'host_closed_room' ? 'Host closed the group' : 'Lost connection',
@@ -89,7 +90,7 @@ function App() {
     // continues in the background. Errors here are best-effort — leaveGroup
     // already swallows them internally.
     setScreen('home');
-    try { await leaveGroup(); } catch (_) { /* best-effort */ }
+    try { await leaveGroup(); } catch { /* best-effort */ }
     finally { setBusy(false); }
   };
 
@@ -127,7 +128,7 @@ function App() {
     try {
       const p = leaveGroupRef.current();
       if (p && typeof p.catch === 'function') p.catch(() => {});
-    } catch (_) { /* ignore */ }
+    } catch { /* ignore */ }
   }, []);
 
   return (
@@ -136,14 +137,19 @@ function App() {
       {screen === 'home' ? (
         <HomeScreen onHost={handleHost} onJoin={handleJoin} busy={busy} />
       ) : (
-        <GroupScreen
-          store={store}
-          vox={vox}
-          voxEnabled={voxEnabled}
-          onToggleVox={() => setVoxEnabled((v) => !v)}
-          onMuteToggle={toggleMute}
-          onLeave={handleLeave}
-        />
+        <ErrorBoundary
+          onError={() => { /* fall through to onReset for teardown */ }}
+          onReset={() => { handleLeave(); }}
+        >
+          <GroupScreen
+            store={store}
+            vox={vox}
+            voxEnabled={voxEnabled}
+            onToggleVox={() => setVoxEnabled((v) => !v)}
+            onMuteToggle={toggleMute}
+            onLeave={handleLeave}
+          />
+        </ErrorBoundary>
       )}
     </SafeAreaProvider>
   );

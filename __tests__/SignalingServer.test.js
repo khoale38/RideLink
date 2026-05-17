@@ -7,6 +7,7 @@
  * access. The server still requires a `join` first (identity gate) so peers
  * can't send anonymous offers/ICE before being added to the roster.
  */
+/* global Buffer */
 
 import TcpSocket from 'react-native-tcp-socket';
 import { startSignalingServer, stopSignalingServer } from '../src/services/SignalingServer';

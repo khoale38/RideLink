@@ -191,9 +191,18 @@ export function useVOX(localStream, enabled = true, localLevelRef = null) {
         });
         Recorder.setListener((data) => onSample(_rmsDb(data)));
         Recorder.start();
+        // Guarded teardown: `Recorder.stop()` is not awaited (native side is
+        // async). A rapid unmount → mount cycle could otherwise call start()
+        // before the prior stop's native unwind completes. The `stopping`
+        // latch on the global Recorder state lets the next mount's
+        // setListener(null) + stop() act as a noop if cleanup is already
+        // in flight from THIS effect's teardown.
+        let stopped = false;
         stopRecorder = () => {
-          Recorder.setListener(null);
-          Recorder.stop();
+          if (stopped) return;
+          stopped = true;
+          try { Recorder.setListener(null); } catch (_) { /* ignore */ }
+          try { Recorder.stop(); } catch (_) { /* ignore */ }
         };
       } catch (err) {
         if (__DEV__) console.warn('[VOX] failed to start AudioRecord:', err?.message ?? err);
@@ -208,7 +217,13 @@ export function useVOX(localStream, enabled = true, localLevelRef = null) {
       speakingRef.current = false;
       setSpeaking(false);
     };
-  }, [enabled, localStream, recalibrateNonce]); // eslint-disable-line react-hooks/exhaustive-deps
+    // INVARIANT: `manualOverride` is intentionally not in the dep array —
+    // the only path that should restart calibration is `recalibrate()`,
+    // which flips manualOverride=false AND increments recalibrateNonce.
+    // A future caller that sets manualOverride directly would need to also
+    // increment the nonce (or be added here) to retrigger calibration.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [enabled, localStream, recalibrateNonce]);
 
   // `speaking`: should the UI show a "speaking" indicator (real voice activity).
   // `transmit`: should the audio track be enabled — follows `speaking` on

@@ -10,6 +10,7 @@
  * lives for the lifetime of the JS bundle, and useVOX just swaps the
  * callback target via setListener().
  */
+/* global globalThis */
 import { NativeEventEmitter, NativeModules } from 'react-native';
 
 const { RNAudioRecord } = NativeModules;
