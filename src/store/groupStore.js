@@ -31,8 +31,6 @@ import { useState, useCallback } from 'react';
  * @property {(p: string) => void} setHotspotPassword
  * @property {string} hotspotSsid
  * @property {(s: string) => void} setHotspotSsid
- * @property {boolean} selfSpeaking
- * @property {(s: boolean) => void} setSelfSpeaking
  * @property {() => void} reset
  */
 
@@ -46,7 +44,6 @@ export function useGroupStore() {
   const [muted, setMuted] = useState(false);
   const [hotspotPassword, setHotspotPassword] = useState('');
   const [hotspotSsid, setHotspotSsid] = useState('');
-  const [selfSpeaking, setSelfSpeaking] = useState(false);
 
   const addPeer = useCallback((peer) => {
     setPeers((prev) => {
@@ -120,7 +117,6 @@ export function useGroupStore() {
     setMyId(null);
     setPeers([]);
     setMuted(false);
-    setSelfSpeaking(false);
     setHotspotSsid('');
     setHotspotPassword('');
     setRole(null);
@@ -138,7 +134,6 @@ export function useGroupStore() {
     muted, setMuted,
     hotspotPassword, setHotspotPassword,
     hotspotSsid, setHotspotSsid,
-    selfSpeaking, setSelfSpeaking,
     reset,
   };
 }

@@ -39,10 +39,6 @@ export function useIntercom(store, { onKicked } = {}) {
     sessionLockRef.current = next.catch(() => {});
     return next;
   };
-  // Live 0..1 local mic level from WebRTC getStats. iOS useVOX polls this
-  // because it can't open a parallel mic capture; Android ignores it and
-  // reads PCM frames directly from RNAudioRecord instead.
-  const localLevelRef = useRef(0);
   const [localStream, setLocalStream] = useState(null);
 
   // Single recovery primitive. Every teardown path (user leave, hostGroup/
@@ -273,7 +269,6 @@ export function useIntercom(store, { onKicked } = {}) {
     const client = new SignalingClient(host, SIGNALING_PORT, handlers);
     signalingRef.current = client;
 
-    let selfSpeakingMissingWarned = false;
     const rtc = new WebRTCManager(
       client,
       (peerId, speaking) => storeRef.setPeerSpeaking(peerId, speaking),
@@ -281,19 +276,6 @@ export function useIntercom(store, { onKicked } = {}) {
         logger.error('useIntercom', errInfo.error, { stage: errInfo.stage, peerId: errInfo.peerId });
       },
       (peerId, state) => storeRef.setPeerConnectionState(peerId, state),
-      // Local speaking indicator is required for the UI's "you are talking"
-      // border. Optional-chaining the setter silently kills that indicator
-      // if the store ever drops it — log once on the first missed call so
-      // the regression is at least visible in the field.
-      (speaking) => {
-        if (typeof storeRef.setSelfSpeaking === 'function') {
-          storeRef.setSelfSpeaking(speaking);
-        } else if (!selfSpeakingMissingWarned) {
-          selfSpeakingMissingWarned = true;
-          logger.warn('useIntercom', 'store.setSelfSpeaking missing — local speaking indicator disabled');
-        }
-      },
-      (level) => { localLevelRef.current = level; },
     );
     rtcRef.current = rtc;
 
@@ -325,5 +307,5 @@ export function useIntercom(store, { onKicked } = {}) {
     rtcRef.current?.setTransmitting?.(enabled);
   }, []);
 
-  return { hostGroup, joinGroup, leaveGroup, toggleMute, localStream, localLevelRef, setTransmitting };
+  return { hostGroup, joinGroup, leaveGroup, toggleMute, localStream, setTransmitting };
 }

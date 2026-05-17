@@ -1,10 +1,13 @@
 /**
  * VOX (Voice-Activated Transmit)
  *
- * Android: monitors mic amplitude via react-native-audio-record (PCM frames).
- * iOS:     reads WebRTC `getStats()` media-source audioLevel (0..1), which
- *          doesn't require opening a parallel mic capture (which would
- *          conflict with WebRTC's AVAudioSession).
+ * Both platforms monitor mic amplitude via react-native-audio-record (PCM
+ * frames). iOS originally used WebRTC getStats() media-source audioLevel to
+ * avoid opening a parallel mic capture, but that path is broken on the
+ * current react-native-webrtc build: the loopback workaround needed to
+ * populate stats for a solo host back-pressures iOS capture and freezes the
+ * energy counter after ~0.75s. PCM via AudioToolbox sits alongside WebRTC's
+ * PlayAndRecord AVAudioSession without conflict and gives a stable level.
  *
  * Both paths normalize to dBFS so the threshold UI is identical:
  *   -50 dB  = very sensitive (quiet room)
@@ -12,15 +15,8 @@
  *   -30 dB  = less sensitive (loud wind / highway)
  */
 import { useRef, useState, useEffect } from 'react';
-import { Platform } from 'react-native';
 import { Recorder } from '../services/AudioRecorder';
 import { logger } from '../services/logger';
-
-const IS_IOS = Platform.OS === 'ios';
-// iOS polls a level ref the WebRTCManager fills via getStats. Cadence matches
-// the manager's poll (~300ms). Slightly slower attack than Android PCM but
-// avoids the AVAudioSession conflict.
-const IOS_POLL_MS = 150;
 
 const SAMPLE_RATE = 8000;        // Hz — low enough for level-only monitoring
 const CHANNELS = 1;
@@ -40,7 +36,7 @@ const CALIBRATION_MAX_DB = -20;      // clamp so a noisy probe doesn't lock VOX 
 // NOTE: useVOX only observes mic amplitude and reports `speaking`.
 // It does NOT mutate track.enabled — that's owned by App.tsx, which knows
 // about muted/voxEnabled/speaking together and is the single source of truth.
-export function useVOX(localStream, enabled = true, localLevelRef = null) {
+export function useVOX(localStream, enabled = true) {
   const [speaking, setSpeaking] = useState(false);
   const [thresholdDb, setThresholdDb] = useState(DEFAULT_THRESHOLD_DB);
   const [calibrating, setCalibrating] = useState(false);
@@ -136,15 +132,11 @@ export function useVOX(localStream, enabled = true, localLevelRef = null) {
       }
     };
 
-    let iosTimer = null;
     let stopRecorder = null;
-    // Belt-and-suspenders calibration timeout: applies to BOTH platforms.
-    // - iOS already has an 8s watchdog inside its tick, but if the timer
-    //   itself never fires (e.g. Date.now drift, app paused), we still
-    //   want a hard cap.
-    // - Android: a truly silent room makes _rmsDb() return -Infinity, which
-    //   onSample() drops as non-finite — calibrationDoneAt is never set and
-    //   the rider stays gated shut. This timer is the only escape.
+    // Cross-platform calibration watchdog: a truly silent room makes
+    // _rmsDb() return -Infinity, which onSample() drops as non-finite —
+    // calibrationDoneAt is never set and the rider stays gated shut. This
+    // timer is the only escape.
     const calibrationWatchdog = calibrationActive
       ? setTimeout(() => {
           if (!calibrationActive) return;
@@ -158,59 +150,37 @@ export function useVOX(localStream, enabled = true, localLevelRef = null) {
           }
         }, 8000)
       : null;
-    if (IS_IOS) {
-      // iOS path: poll the WebRTCManager-supplied level ref. No peer
-      // connection → ref stays at 0 → calibration would lock at -inf;
-      // the cross-platform calibrationWatchdog above is the canonical
-      // escape hatch for that case (sets calibrationFailed=true after 8s).
-      const tick = () => {
-        const level = localLevelRef?.current ?? 0;
-        // 0..1 → dBFS. level=0 → -Infinity (silent / no pc yet).
-        const db = level > 0 ? 20 * Math.log10(level) : -Infinity;
-        onSample(db);
-      };
-      iosTimer = setInterval(tick, IOS_POLL_MS);
-    } else {
-      try {
-        // Recorder state lives on globalThis (survives Fast Refresh / hook
-        // remount). A prior session that didn't reach its cleanup — or an
-        // iOS↔Android platform flip on the same JS bundle — could leave
-        // `running` true; force-stop here so start() reliably re-arms the
-        // native capture rather than no-oping.
-        // Clear the listener BEFORE stopping so an in-flight frame from the
-        // prior session can't fire one last onSample() against the new
-        // session's closures (calibrationActive / thresholdRef captured by
-        // this effect's scope). Then stop the recorder itself.
+    try {
+      // Recorder state lives on globalThis (survives Fast Refresh / hook
+      // remount). A prior session that didn't reach its cleanup could leave
+      // `running` true; force-stop here so start() reliably re-arms the
+      // native capture rather than no-oping.
+      // Clear the listener BEFORE stopping so an in-flight frame from the
+      // prior session can't fire one last onSample() against the new
+      // session's closures (calibrationActive / thresholdRef captured by
+      // this effect's scope). Then stop the recorder itself.
+      try { Recorder.setListener(null); } catch (_) { /* ignore */ }
+      try { Recorder.stop(); } catch (_) { /* ignore */ }
+      Recorder.configure({
+        sampleRate: SAMPLE_RATE,
+        channels: CHANNELS,
+        bitsPerSample: BITS_PER_SAMPLE,
+        wavFile: '',
+      });
+      Recorder.setListener((data) => onSample(_rmsDb(data)));
+      Recorder.start();
+      let stopped = false;
+      stopRecorder = () => {
+        if (stopped) return;
+        stopped = true;
         try { Recorder.setListener(null); } catch (_) { /* ignore */ }
         try { Recorder.stop(); } catch (_) { /* ignore */ }
-        Recorder.configure({
-          sampleRate: SAMPLE_RATE,
-          channels: CHANNELS,
-          bitsPerSample: BITS_PER_SAMPLE,
-          wavFile: '',
-        });
-        Recorder.setListener((data) => onSample(_rmsDb(data)));
-        Recorder.start();
-        // Guarded teardown: `Recorder.stop()` is not awaited (native side is
-        // async). A rapid unmount → mount cycle could otherwise call start()
-        // before the prior stop's native unwind completes. The `stopping`
-        // latch on the global Recorder state lets the next mount's
-        // setListener(null) + stop() act as a noop if cleanup is already
-        // in flight from THIS effect's teardown.
-        let stopped = false;
-        stopRecorder = () => {
-          if (stopped) return;
-          stopped = true;
-          try { Recorder.setListener(null); } catch (_) { /* ignore */ }
-          try { Recorder.stop(); } catch (_) { /* ignore */ }
-        };
-      } catch (err) {
-        if (__DEV__) console.warn('[VOX] failed to start AudioRecord:', err?.message ?? err);
-      }
+      };
+    } catch (err) {
+      if (__DEV__) console.warn('[VOX] failed to start AudioRecord:', err?.message ?? err);
     }
 
     return () => {
-      if (iosTimer) clearInterval(iosTimer);
       if (calibrationWatchdog) clearTimeout(calibrationWatchdog);
       if (stopRecorder) stopRecorder();
       clearTimeout(holdTimer.current);
@@ -226,16 +196,11 @@ export function useVOX(localStream, enabled = true, localLevelRef = null) {
   }, [enabled, localStream, recalibrateNonce]);
 
   // `speaking`: should the UI show a "speaking" indicator (real voice activity).
-  // `transmit`: should the audio track be enabled — follows `speaking` on
-  // both platforms now that iOS has its own (getStats-based) level path.
+  // `transmit`: should the audio track be enabled — follows `speaking`.
   //
-  // Fail-safe: on iOS solo host, _localStatsPc may never produce an audioLevel
-  // (no remote answer → no media-source stats on some react-native-webrtc
-  // builds). After 8s VOX gives up calibration with calibrationFailed=true and
-  // level stays at 0. Without this fallback the gate would stay shut forever
-  // and the rider's audio would never transmit. Treat that case as "VOX off":
-  // mic is always live, border always shown, so the intercom is at least
-  // usable while we wait for a real peer to bring stats online.
+  // Fail-safe: if calibration times out with no audible samples (mic
+  // permission denied, recorder failed to start, truly silent room), keep
+  // transmit=true so the intercom is at least usable.
   const voxUnavailable = calibrationFailed;
   const transmit = voxUnavailable ? true : speaking;
   // UI indicator must reflect actual voice activity — never force it on just

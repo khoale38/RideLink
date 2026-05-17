@@ -70,7 +70,6 @@ function makeStore() {
     setMyId: jest.fn(),
     setPeerSpeaking: jest.fn(),
     setPeerConnectionState: jest.fn(),
-    setSelfSpeaking: jest.fn(),
     setMuted: jest.fn(),
     reset: jest.fn(),
     muted: false,

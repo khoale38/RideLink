@@ -529,43 +529,6 @@ test('reconnect flow: resetPeers wipes state then peer_list replay produces fres
   rtc.destroy();
 });
 
-test('_localStatsPc setup is bounded by MAX_BUILD_ATTEMPTS', async () => {
-  // Constructor throws → _buildLocalStatsPc fails → _ensureLocalStatsPc retries.
-  // After 3 failed attempts it must stop calling the constructor.
-  RTCPeerConnection.mockImplementation(() => { throw new Error('native broken'); });
-  const signaling = makeSignaling();
-  const rtc = new WebRTCManager(signaling, jest.fn(), jest.fn(), jest.fn(), jest.fn());
-  rtc.localStream = { getTracks: () => [] }; // bypass startLocalAudio
-
-  await rtc._ensureLocalStatsPc();
-  await rtc._ensureLocalStatsPc();
-  await rtc._ensureLocalStatsPc();
-  await rtc._ensureLocalStatsPc(); // should no-op
-  await rtc._ensureLocalStatsPc(); // should no-op
-
-  // First pc constructor throws → second is never reached this build, so
-  // one call per attempt × MAX_BUILD_ATTEMPTS = 3.
-  expect(RTCPeerConnection).toHaveBeenCalledTimes(3);
-  rtc.destroy();
-});
-
-test('_localStatsPc retry symmetry: single caller retries up to MAX_BUILD_ATTEMPTS', async () => {
-  // Regression guard for the asymmetry: previously the original builder got
-  // exactly one shot while concurrent waiters got retried. A solo caller
-  // hitting a transient native failure must also retry until the cap.
-  // _buildLocalStatsPc catches sync throws and reports non-fatal, leaving
-  // _localStatsPc null — so _ensureLocalStatsPc must self-recurse.
-  RTCPeerConnection.mockImplementation(() => { throw new Error('native broken'); });
-  const signaling = makeSignaling();
-  const rtc = new WebRTCManager(signaling, jest.fn(), jest.fn(), jest.fn(), jest.fn());
-  rtc.localStream = { getTracks: () => [] };
-
-  // ONE call should now exhaust all 3 attempts (was 1 attempt before).
-  await rtc._ensureLocalStatsPc();
-  expect(RTCPeerConnection).toHaveBeenCalledTimes(3);
-  rtc.destroy();
-});
-
 test('iceConnectionState=connected resets restartAttempts even if connectionState lags', async () => {
   // Some react-native-webrtc builds leave connectionState parked in
   // 'connecting' even when iceConnectionState reaches 'connected' and
@@ -669,24 +632,6 @@ test('iceConnectionState=connected reports onPeerState even if connectionState s
   rtc.destroy();
 });
 
-test('peer connect resets _localStatsPcAttempts so VOX can rebuild later', async () => {
-  // If loopback PC setup failed three times early on, the cap previously
-  // pinned solo-host VOX off until app restart. Once we actually establish
-  // a real peer, conditions have demonstrably improved; reset the budget.
-  const pc = makePc();
-  RTCPeerConnection.mockImplementation(() => pc);
-  const signaling = makeSignaling();
-  const rtc = new WebRTCManager(signaling, jest.fn(), jest.fn(), jest.fn(), jest.fn());
-  rtc.setMyId('peer-z');
-  await rtc.callPeer('peer-a');
-
-  rtc._localStatsPcAttempts = 3; // exhausted budget
-  pc.iceConnectionState = 'connected';
-  pc.oniceconnectionstatechange();
-  expect(rtc._localStatsPcAttempts).toBe(0);
-  rtc.destroy();
-});
-
 test('_handleAnswer stale-state warning fires once per entry, not every duplicate', async () => {
   // Under fast ICE-restart churn, stale answers are legitimate. Logging on
   // every occurrence drowns out real issues. Implementation guards via a
@@ -747,19 +692,12 @@ test('destroy awaits a running stats tick before resolving', async () => {
   let resolveStats;
   pc.getStats.mockImplementation(() => new Promise((r) => { resolveStats = r; }));
 
-  const onLocalVoice = jest.fn();
-  const rtc = new WebRTCManager(signaling, jest.fn(), jest.fn(), jest.fn(), onLocalVoice, jest.fn());
-  // Wait for the first tick to start. The constructor schedules tick via
-  // setTimeout(0); flush macrotasks until _tickRunning is populated.
-  await new Promise((r) => setTimeout(r, 0));
-  await new Promise((r) => setTimeout(r, 350));
-  // Tick is awaiting _localStatsPc?.getStats() OR the per-peer getStats —
-  // _localStatsPc may not exist (no localStream), so force a peer-iteration
-  // tick by faking a localStatsPc:
-  rtc._localStatsPc = pc;
+  const rtc = new WebRTCManager(signaling, jest.fn(), jest.fn(), jest.fn());
+  // Add a peer so the speaking poll has something to call getStats on.
+  rtc.setMyId('peer-z');
+  await rtc.callPeer('peer-a');
 
-  // Trigger a fresh tick that will block on getStats.
-  // (Previous tick may have already completed — start a new wait.)
+  // Trigger a tick that will block on getStats.
   await new Promise((r) => setTimeout(r, 350));
 
   const destroyP = rtc.destroy();

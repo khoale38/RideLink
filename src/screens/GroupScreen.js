@@ -81,11 +81,11 @@ function RiderList({ myName, peers, isSpeaking }) {
 }
 
 export function GroupScreen({ store, vox, voxEnabled, onToggleVox, onMuteToggle, onLeave }) {
-  const { myName, peers, muted, role, connected, hotspotPassword, hotspotSsid, selfSpeaking } = store;
-  // `selfSpeaking` is driven by WebRTC `media-source` stats (works on iOS+Android
-  // once you have a peer). VOX speaking is the legacy Android-only RMS path.
-  // Show the border if either says we're talking — and only if mic isn't muted.
-  const isSpeaking = !muted && (selfSpeaking || (voxEnabled && vox.speaking));
+  const { myName, peers, muted, role, connected, hotspotPassword, hotspotSsid } = store;
+  // VOX runs whenever we're in a group (see App.tsx), so vox.speaking is the
+  // single source of truth for the local "you are talking" border — works
+  // even when VOX-as-gate is off.
+  const isSpeaking = !muted && vox.speaking;
   // On Android the LocalOnlyHotspot module hands us the real OS-generated SSID
   // via `hotspotSsid`. Elsewhere we fall back to a name-based suggestion that
   // the user must match manually in Settings.

@@ -11,7 +11,7 @@ import { ErrorBoundary } from './src/components/ErrorBoundary';
 
 function App() {
   const store = useGroupStore();
-  const { hostGroup, joinGroup, leaveGroup, toggleMute, localStream, localLevelRef, setTransmitting } = useIntercom(store, {
+  const { hostGroup, joinGroup, leaveGroup, toggleMute, localStream, setTransmitting } = useIntercom(store, {
     onKicked: async (reason: 'host_closed_room' | 'connection_lost') => {
       // Await teardown so a user tapping Host/Join immediately after the alert
       // dismisses doesn't race a still-running signaling server / FG service.
@@ -29,7 +29,10 @@ function App() {
   const [voxEnabled, setVoxEnabled] = useState(true);
   const [busy, setBusy] = useState(false);
 
-  const vox = useVOX(localStream, screen === 'group' && voxEnabled && !store.muted, localLevelRef);
+  // Run VOX whenever we're in a group (not just when voxEnabled), so the
+  // self-speaking indicator works even with VOX off. Transmission is gated
+  // separately below via vox.transmit + voxEnabled.
+  const vox = useVOX(localStream, screen === 'group' && !store.muted);
 
   // Single source of truth for whether outbound mic audio reaches peers.
   // - muted: never transmit

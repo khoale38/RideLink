@@ -13,25 +13,7 @@
  * scenarios on the bumped react-native-webrtc version).
  * ----------------------------------------------------------------------------
  *
- * 1. `_localStatsPc` / `_buildLocalStatsPc` loopback PeerConnection pair.
- *    REASON: react-native-webrtc on iOS does not populate `media-source`
- *    audioLevel in getStats() unless the local SDP has a matching remote
- *    answer. Without a peer, a solo host's "speaking" indicator stays dark
- *    and VOX calibration never completes.
- *    REMEDY: handshake against an in-process companion pc so the stats path
- *    is hot. The companion's received track is disabled twice (event-time
- *    AND via getReceivers pre-loop) because some builds start auto-playing
- *    decoded audio between setLocalDescription(answer) and the 'track'
- *    event firing, causing the rider to hear themselves and the mic to
- *    feed back through the speaker. We use track.enabled = false rather
- *    than _setVolume(0); the latter isn't wired through to remote tracks
- *    in this build (silent no-op), causing full-volume feedback. Empirically
- *    media-source.audioLevel still reports real levels with the receiver
- *    disabled on the SENDER side of the pair.
- *    RETIREMENT CHECK: solo-host VOX lights up with a single pc and only
- *    setLocalDescription called.
- *
- * 2. `oniceconnectionstatechange` driving `onPeerState('connected')` and
+ * 1. `oniceconnectionstatechange` driving `onPeerState('connected')` and
  *    resetting `restartAttempts`.
  *    REASON: on some react-native-webrtc builds `connectionState` parks in
  *    'connecting' even when ICE has actually reached 'connected' and media
@@ -41,7 +23,7 @@
  *    RETIREMENT CHECK: end-to-end connect cleanly advances connectionState
  *    to 'connected' on both iOS and Android within the watchdog window.
  *
- * 3. Sibling-handler composition in `_bindSignalingHandlers`.
+ * 2. Sibling-handler composition in `_bindSignalingHandlers`.
  *    REASON: useIntercom installs handler functions on the shared
  *    `handlers` object BEFORE the WebRTCManager is constructed; clobbering
  *    them would silently break sibling listeners that the hook may add for
@@ -49,7 +31,7 @@
  *    RETIREMENT CHECK: not build-specific — this is a permanent
  *    architectural constraint of the shared-handlers shape.
  *
- * 4. `pendingCandidates` buffer with preserved-across-rebuild semantics.
+ * 3. `pendingCandidates` buffer with preserved-across-rebuild semantics.
  *    REASON: trickle ICE from a remote can race ahead of their SDP arrival
  *    on slow links. The polite-glare path tears down and rebuilds the pc,
  *    so naive deletion of the buffer would drop legitimate candidates.
@@ -93,13 +75,6 @@ const ICE_RESTART_MAX_ATTEMPTS = 6;
 // few benign warnings rather than a torn-down connection.
 const MAX_PENDING_CANDIDATES = 64;
 
-// Lifetime cap on local-stats loopback PC build attempts. The per-peer reset
-// in onconnectionstatechange / oniceconnectionstatechange resets the WINDOW
-// counter so a transiently failing path can retry once conditions improve,
-// but if the failure is permanent (broken native module, OS audio session
-// permanently wedged) the lifetime cap stops infinite retry rounds.
-const LOCAL_STATS_PC_LIFETIME_MAX = 12;
-
 // Per-peer state. One instance per (peerId, pc) lifetime — replaced wholesale
 // on glare-rebuild rather than mutated in place, so any in-flight operation
 // that captured the old entry can bail by checking `entry.closed` or by
@@ -124,14 +99,9 @@ class PeerEntry {
 }
 
 export class WebRTCManager {
-  constructor(signalingClient, onVoiceActivity, onError, onPeerState, onLocalVoiceActivity, onLocalAudioLevel) {
+  constructor(signalingClient, onVoiceActivity, onError, onPeerState) {
     this.signaling = signalingClient;
     this.onVoiceActivity = onVoiceActivity;
-    this.onLocalVoiceActivity = onLocalVoiceActivity; // (speaking) — true when our mic is hot
-    // (level) — raw local audioLevel 0..1 from getStats media-source, fires
-    // every poll. Used by useVOX on iOS where opening a parallel mic capture
-    // would conflict with WebRTC's AVAudioSession.
-    this.onLocalAudioLevel = onLocalAudioLevel;
     this.onError = onError;
     this.onPeerState = onPeerState; // (peerId, state) — 'connecting' | 'connected' | 'failed'
     this.peers = new Map(); // peerId -> PeerEntry
@@ -139,21 +109,13 @@ export class WebRTCManager {
     this.destroyed = false;
     this.myId = null; // set by setMyId() — used for polite-peer tie-break on glare
 
-    this.localSpeaking = false;
     this.speakingPoll = null;
-    // Per-peer transmit gate. The local source track stays enabled at all
-    // times so _localStatsPc's media-source audioLevel keeps reporting real
-    // levels — VOX needs that signal to decide when to OPEN the gate, so
-    // gating the source itself would deadlock (level=0 → VOX never fires →
-    // gate never opens). Instead we toggle each peer pc's audio sender via
-    // replaceTrack(null|track) so only outbound transmission is gated; the
-    // self-speaking indicator and VOX calibration keep working.
+    // Per-peer transmit gate. Toggling each peer pc's audio sender via
+    // replaceTrack(null|track) lets us silence outbound audio without
+    // touching the source track itself — local mic capture stays live so
+    // useVOX's PCM monitor (react-native-audio-record) keeps producing
+    // levels even while VOX is gated closed.
     this.transmitting = true;
-    // Lifetime tally of _localStatsPc build attempts, independent of the
-    // window counter `_localStatsPcAttempts` that resets on peer connect.
-    // Together they let transient failures retry while permanent failures
-    // give up.
-    this._localStatsPcLifetimeAttempts = 0;
     // Offers that arrived before setMyId() — replayed once we know our id so
     // the glare tie-break in _handleOffer is symmetric on both peers.
     this.pendingOffers = [];
@@ -190,10 +152,10 @@ export class WebRTCManager {
       currentMs = ms;
       this.speakingPoll = setTimeout(tick, ms);
     };
-    // UI callbacks invoked from tick (onVoiceActivity / onLocalVoiceActivity
-    // / onLocalAudioLevel) can throw if a downstream setter blows up (e.g.
-    // store mutation during teardown). Without this guard, a throw would
-    // skip the trailing schedule(nextMs) and the poll would silently die.
+    // UI callbacks invoked from tick (onVoiceActivity) can throw if a
+    // downstream setter blows up (e.g. store mutation during teardown).
+    // Without this guard, a throw would skip the trailing schedule(nextMs)
+    // and the poll would silently die.
     const safeNotify = (fn, label, ...args) => {
       if (!fn) return;
       try { fn(...args); } catch (err) {
@@ -209,21 +171,6 @@ export class WebRTCManager {
       let resolveRunning;
       this._tickRunning = new Promise((r) => { resolveRunning = r; });
       try {
-      let localLevel = 0;
-      // Always read our own mic level from the local-only stats pc — that way
-      // a solo host (peers.size === 0) still sees a non-zero audioLevel and
-      // VOX calibration can complete instead of waiting 8s for the fallback.
-      if (this._localStatsPc) {
-        try {
-          const stats = await this._localStatsPc.getStats();
-          if (this.destroyed) return;
-          stats.forEach((report) => {
-            if (report.type === 'media-source' && typeof report.audioLevel === 'number') {
-              if (report.audioLevel > localLevel) localLevel = report.audioLevel;
-            }
-          });
-        } catch (_) { /* getStats can throw mid-teardown; ignore */ }
-      }
       for (const [peerId, entry] of this.peers) {
         try {
           const stats = await entry.pc.getStats();
@@ -235,10 +182,6 @@ export class WebRTCManager {
             if (!isAudio) return;
             if (report.type === 'inbound-rtp' && typeof report.audioLevel === 'number') {
               if (report.audioLevel > remoteLevel) remoteLevel = report.audioLevel;
-            } else if (report.type === 'media-source' && typeof report.audioLevel === 'number') {
-              // Our own mic input — same value across every pc, so taking the
-              // max across the loop is harmless and a noop after the first one.
-              if (report.audioLevel > localLevel) localLevel = report.audioLevel;
             }
           });
           const speaking = remoteLevel >= SPEAKING_THRESHOLD;
@@ -248,21 +191,6 @@ export class WebRTCManager {
           }
         } catch (_) { /* getStats can throw mid-teardown; ignore */ }
       }
-      // Hold the speaking flag on for a short window after the last loud
-      // sample so the border doesn't flicker off between syllables — the
-      // 300ms poll cadence is slower than typical word gaps, so without this
-      // every pause flipped speaking back to false. Mirrors the HOLD_MS
-      // strategy in useVOX.
-      const HOLD_MS = 600;
-      const now = Date.now();
-      if (localLevel >= SPEAKING_THRESHOLD) this._lastLocalLoudAt = now;
-      const localSpeaking = (this._lastLocalLoudAt ?? 0) + HOLD_MS > now;
-      if (this.localSpeaking !== localSpeaking) {
-        this.localSpeaking = localSpeaking;
-        safeNotify(this.onLocalVoiceActivity, 'onLocalVoiceActivity', localSpeaking);
-      }
-      if (this.destroyed) return;
-      safeNotify(this.onLocalAudioLevel, 'onLocalAudioLevel', localLevel);
       if (this.destroyed) return;
       const nextMs = this.peers.size > 4 ? slowMs : fastMs;
       if (nextMs !== currentMs) {
@@ -355,7 +283,6 @@ export class WebRTCManager {
         readyState: track?.readyState,
         label: track?.label,
       });
-      await this._ensureLocalStatsPc();
       return this.localStream;
     } catch (err) {
       this._reportError('getUserMedia', err);
@@ -363,144 +290,9 @@ export class WebRTCManager {
     }
   }
 
-  // Stand up a loopback PeerConnection pair that owns the local stream. The
-  // two PCs handshake against each other in-process so `media-source`
-  // audioLevel reports are reliably populated by getStats() — react-native-
-  // webrtc on iOS doesn't fill them when only setLocalDescription is called
-  // without a matching remote answer. This is the same trick the mic test
-  // uses and is what lets a solo host's "speaking" indicator light up.
-  //
-  // RETIREMENT: this workaround targets a specific react-native-webrtc bug.
-  // When that dep is bumped, re-test solo-host VOX with this whole loopback
-  // pair removed — if `media-source` audioLevel is now populated from a
-  // single pc with only setLocalDescription, delete _ensureLocalStatsPc /
-  // _buildLocalStatsPc / _localStatsPc* entirely and just call getStats()
-  // on a peer pc (or a single dummy pc) directly. Alternative simplification
-  // if the upstream bug stays: replace the double track-disable hack with a
-  // `pcRemote.addTransceiver('audio', { direction: 'recvonly' })` combined
-  // with discarding pcRemote's receivers — eliminates the playback path
-  // entirely instead of suppressing it after the fact.
-  async _ensureLocalStatsPc() {
-    // Bound retries — a synchronously throwing RTCPeerConnection constructor
-    // (broken native module, unsupported platform) would otherwise loop
-    // forever as every caller re-tries the build path below. Iterative loop
-    // keeps the retry budget visible in one place; previously the same
-    // condition lived in two recursive tails (concurrent waiter + post-build)
-    // which made the worst-case call depth harder to reason about.
-    const MAX_BUILD_ATTEMPTS = 3;
-    while (!this._localStatsPc && this.localStream && !this.destroyed) {
-      if ((this._localStatsPcAttempts ?? 0) >= MAX_BUILD_ATTEMPTS) return;
-      // Lifetime cap: prevents a permanent failure (broken native module,
-      // permanently wedged audio session) from looping forever even after
-      // a peer briefly connects and resets the window counter.
-      if (this._localStatsPcLifetimeAttempts >= LOCAL_STATS_PC_LIFETIME_MAX) return;
-      // In-flight guard: concurrent startLocalAudio calls (e.g. reconnect
-      // race) would otherwise each build a loopback pc pair; the first
-      // assignment would be orphaned with no close() ever called. Share the
-      // promise so every caller awaits the same single setup.
-      if (this._localStatsPcSetup) {
-        await this._localStatsPcSetup;
-        // If the in-flight build failed, _localStatsPc stays null and the
-        // loop condition retries (up to MAX_BUILD_ATTEMPTS).
-        continue;
-      }
-      this._localStatsPcAttempts = (this._localStatsPcAttempts ?? 0) + 1;
-      this._localStatsPcLifetimeAttempts += 1;
-      this._localStatsPcSetup = this._buildLocalStatsPc();
-      try {
-        await this._localStatsPcSetup;
-      } finally {
-        this._localStatsPcSetup = null;
-      }
-    }
-  }
-
-  async _buildLocalStatsPc() {
-    let pc;
-    let pcRemote;
-    try {
-      // Construct inside the try so a synchronously-throwing native
-      // RTCPeerConnection constructor (broken native module, unsupported
-      // platform) routes through _reportError as non-fatal instead of
-      // escaping awaiters of _ensureLocalStatsPc.
-      pc = new RTCPeerConnection(RTC_CONFIG);
-      pcRemote = new RTCPeerConnection(RTC_CONFIG);
-      // Surface loopback ICE errors as non-fatal so a broken handshake doesn't
-      // silently leave _localStatsPc unset (solo-host speaking indicator dead).
-      pc.addEventListener?.('icecandidate', (e) => {
-        if (e.candidate) {
-          try {
-            const p = pcRemote.addIceCandidate(e.candidate);
-            if (p && typeof p.catch === 'function') {
-              p.catch((err) => this._reportError('localStatsPc.addIce(remote)', err, null, /* fatal */ false));
-            }
-          } catch (err) {
-            this._reportError('localStatsPc.addIce(remote)', err, null, /* fatal */ false);
-          }
-        }
-      });
-      pcRemote.addEventListener?.('icecandidate', (e) => {
-        if (e.candidate) {
-          try {
-            const p = pc.addIceCandidate(e.candidate);
-            if (p && typeof p.catch === 'function') {
-              p.catch((err) => this._reportError('localStatsPc.addIce(local)', err, null, /* fatal */ false));
-            }
-          } catch (err) {
-            this._reportError('localStatsPc.addIce(local)', err, null, /* fatal */ false);
-          }
-        }
-      });
-      // Critical: the loopback handshake makes pcRemote auto-play the received
-      // audio through the device speaker (same path the mic test uses on
-      // purpose). Without silencing it, the rider hears themselves and the
-      // playback feeds back into the mic — pegging media-source.audioLevel
-      // permanently high and making "speaking" always-on. We tried
-      // _setVolume(0) but the function isn't present on remote tracks in
-      // this react-native-webrtc build, so it silently no-ops. track.enabled
-      // = false is what works empirically: media-source on the SENDER side
-      // still reports real levels (verified by VOX calibration succeeding
-      // at -41 dB noise floor with this setting).
-      pcRemote.addEventListener?.('track', (e) => {
-        const track = e?.track;
-        if (track) {
-          try { track.enabled = false; } catch (_) { /* ignore */ }
-        }
-      });
-      this.localStream.getTracks().forEach((t) => pc.addTrack(t, this.localStream));
-      const offer = await pc.createOffer();
-      if (this.destroyed) { try { pc.close(); } catch (_) {} try { pcRemote.close(); } catch (_) {} return; }
-      await pc.setLocalDescription(offer);
-      await pcRemote.setRemoteDescription(offer);
-      // Disable any received tracks BEFORE the answer is set — on some
-      // react-native-webrtc builds the platform starts routing decoded audio
-      // to the device speaker as soon as setLocalDescription(answer) runs,
-      // which is earlier than the 'track' event below. Doing it here closes
-      // the few-ms loopback window. See the 'track' listener above for why
-      // we use track.enabled = false (despite the theoretical risk of
-      // halting media-source) instead of _setVolume — the latter isn't
-      // wired through to the receiver in this build.
-      try {
-        pcRemote.getReceivers?.().forEach((r) => {
-          if (r?.track) { try { r.track.enabled = false; } catch (_) { /* ignore */ } }
-        });
-      } catch (_) { /* ignore */ }
-      const answer = await pcRemote.createAnswer();
-      await pcRemote.setLocalDescription(answer);
-      await pc.setRemoteDescription(answer);
-      this._localStatsPc = pc;
-      this._localStatsPcRemote = pcRemote;
-    } catch (err) {
-      try { pc?.close(); } catch (_) { /* ignore */ }
-      try { pcRemote?.close(); } catch (_) { /* ignore */ }
-      this._reportError('localStatsPc', err, null, /* fatal */ false);
-    }
-  }
-
   // Gate outbound transmission per-peer without disabling the source track,
-  // so the self-speaking indicator / VOX level path stays alive even when the
-  // gate is closed. Audible monitor (_localStatsPc) is intentionally NOT
-  // touched — it must always see the live source.
+  // so the local mic capture stays live for useVOX's PCM monitor even while
+  // VOX has the gate closed.
   setTransmitting(enabled) {
     this.transmitting = !!enabled;
     const track = this.localStream?.getAudioTracks?.()[0];
@@ -905,12 +697,6 @@ export class WebRTCManager {
         // when both states do fire — the embedding store ignores no-op
         // transitions.
         this.onPeerState?.(peerId, 'connected');
-        // Also a great moment to clear a stale _localStatsPc build-attempt
-        // budget: if loopback PC setup was failing transiently and we've
-        // since established a real peer, conditions for the next attempt
-        // are now demonstrably better. Without this, three early failures
-        // permanently disable solo-host VOX until app restart.
-        this._localStatsPcAttempts = 0;
       }
     };
 
@@ -930,7 +716,6 @@ export class WebRTCManager {
       } else if (state === 'connected') {
         this._clearDisconnectTimer(entry);
         entry.restartAttempts = 0; // healthy — reset backoff
-        this._localStatsPcAttempts = 0; // see oniceconnectionstatechange
         this.onPeerState?.(peerId, 'connected');
       } else if (state === 'disconnected' || state === 'failed') {
         this.onPeerState?.(peerId, 'connecting');
@@ -1022,13 +807,12 @@ export class WebRTCManager {
   // and the rejoiner becomes a silent guest.
   resetPeers() {
     if (this.destroyed) return;
-    // Deliberately preserves localStream and _localStatsPc. On a signaling
-    // reconnect the mic capture is still valid (same AVAudioSession, same
-    // track) — callPeer() in the replayed peer_list adds those existing
-    // tracks to each fresh pc. Nulling localStream here would force a
-    // full mic re-acquisition on every reconnect, which on iOS triggers a
-    // brief audio-route glitch and on Android can race against the
-    // foreground service.
+    // Deliberately preserves localStream. On a signaling reconnect the mic
+    // capture is still valid (same AVAudioSession, same track) — callPeer()
+    // in the replayed peer_list adds those existing tracks to each fresh pc.
+    // Nulling localStream here would force a full mic re-acquisition on
+    // every reconnect, which on iOS triggers a brief audio-route glitch and
+    // on Android can race against the foreground service.
     const ids = Array.from(this.peers.keys());
     ids.forEach((id) => this._removePeer(id));
     this.pendingOffers = [];
@@ -1097,21 +881,6 @@ export class WebRTCManager {
     });
     this.peers.clear();
     this.pendingOffers = [];
-    // Closing the loopback pair is best-effort — both sides are torn down
-    // here, so any trailing ICE candidate from one pc would land on the
-    // already-closed other pc and be swallowed by the try/catch in
-    // _buildLocalStatsPc's icecandidate listener. The listeners themselves
-    // were attached via addEventListener (not the on* property) so they
-    // can't be detached without a stored ref; the close() call below tells
-    // the native gatherer to stop, which is the canonical cleanup.
-    if (this._localStatsPc) {
-      try { this._localStatsPc.close(); } catch (_) { /* already closed */ }
-      this._localStatsPc = null;
-    }
-    if (this._localStatsPcRemote) {
-      try { this._localStatsPcRemote.close(); } catch (_) { /* already closed */ }
-      this._localStatsPcRemote = null;
-    }
     this.localStream?.getTracks().forEach((t) => {
       try { t.stop(); } catch (_) { /* ignore */ }
     });
