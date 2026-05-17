@@ -49,6 +49,13 @@ export function HomeScreen({ onHost, onJoin, busy = false }) {
   const pcLocalRef = useRef(null);
   const pcRemoteRef = useRef(null);
   const statsTimerRef = useRef(null);
+  // Tracks whether THIS screen acquired the InCallManager session. Without it,
+  // tapping mic-test then immediately tapping Host queues the unmount cleanup
+  // to run InCallManager.stop() *after* useIntercom.hostGroup has acquired the
+  // session for the group — deactivating the AVAudioSession mid-call. The
+  // wrapper handlers below also stop the test synchronously before invoking
+  // onHost/onJoin so the group call starts with a clean session state.
+  const incallActiveRef = useRef(false);
 
   // Auto-request permissions on mount. If already granted the OS returns
   // immediately with no dialog. Only shows a card if the user previously
@@ -121,8 +128,15 @@ export function HomeScreen({ onHost, onJoin, busy = false }) {
   };
 
   const stopMicTest = () => {
-    try { InCallManager.setForceSpeakerphoneOn(false); } catch (_) { /* ignore */ }
-    try { InCallManager.stop(); } catch (_) { /* ignore */ }
+    // Only touch InCallManager if WE acquired it. Otherwise the unmount
+    // cleanup (fired when navigating to GroupScreen after Host/Join) would
+    // call stop() against a session useIntercom is actively using for the
+    // group call.
+    if (incallActiveRef.current) {
+      try { InCallManager.setForceSpeakerphoneOn(false); } catch (_) { /* ignore */ }
+      try { InCallManager.stop(); } catch (_) { /* ignore */ }
+      incallActiveRef.current = false;
+    }
     if (statsTimerRef.current) {
       clearInterval(statsTimerRef.current);
       statsTimerRef.current = null;
@@ -151,6 +165,7 @@ export function HomeScreen({ onHost, onJoin, busy = false }) {
       try {
         InCallManager.start({ media: 'audio' });
         InCallManager.setForceSpeakerphoneOn(true);
+        incallActiveRef.current = true;
       } catch (_) { /* ignore — monitor still works, just quieter */ }
       const stream = await mediaDevices.getUserMedia({ audio: true });
       monitorStreamRef.current = stream;
@@ -365,11 +380,12 @@ export function HomeScreen({ onHost, onJoin, busy = false }) {
               'Go to Settings → Personal Hotspot, turn it on. Riders connect from their own WiFi settings. Then tap Continue.',
               [
                 { text: 'Open Settings', onPress: () => Linking.openURL('App-Prefs:INTERNET_TETHERING').catch(() => Linking.openSettings()) },
-                { text: 'Continue', onPress: () => onHost(name.trim()) },
+                { text: 'Continue', onPress: () => { stopMicTest(); onHost(name.trim()); } },
                 { text: 'Cancel', style: 'cancel' },
               ],
             );
           } else {
+            stopMicTest();
             onHost(name.trim());
           }
         }}
@@ -410,6 +426,7 @@ export function HomeScreen({ onHost, onJoin, busy = false }) {
             );
             return;
           }
+          stopMicTest();
           onJoin(name.trim(), password);
         }}
       >

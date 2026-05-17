@@ -1,16 +1,12 @@
 /**
- * Local-only WebRTC loopback for mic monitoring + stats.
+ * Local-only WebRTC loopback for mic monitoring.
  *
- * Two callers share this:
- *   - HomeScreen mic-test: user-visible audible loopback (speakerphone on,
- *     remote track gain cranked) so the rider hears themselves.
- *   - WebRTCManager._buildLocalStatsPc: silent loopback used to keep
- *     `media-source` audioLevel populated in getStats() for solo-host VOX
- *     calibration on react-native-webrtc builds that need an answered SDP.
- *
- * Differences between the two consumers are minimal (audible vs silent track,
- * who owns the local stream), so they're parameters here rather than two
- * forks of the same handshake.
+ * Currently only HomeScreen's mic-test consumes this — user-visible audible
+ * loopback (speakerphone on, remote track gain cranked) so the rider hears
+ * themselves. The silent path is kept because a second consumer existed
+ * historically (WebRTCManager local-stats PC) and may return if a future
+ * react-native-webrtc bump needs a stable level pipeline that
+ * react-native-audio-record can't satisfy.
  *
  * Returns `{ pcLocal, pcRemote }` — caller closes both on teardown.
  * Throws on failure; caller is responsible for cleanup of any partial state.

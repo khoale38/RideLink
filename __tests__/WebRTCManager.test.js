@@ -811,3 +811,94 @@ test('preserved candidate buffer is capped on glare rebuild', async () => {
   expect(newEntry?.pendingCandidates?.length ?? 0).toBeLessThanOrEqual(64);
   rtc.destroy();
 });
+
+// Make a pc whose getSenders returns audio senders we can spy on for the
+// per-peer transmit gate tests. Each sender starts with the seed track so a
+// later replaceTrack(null) is the observable mutation.
+function makePcWithSenders(seedTrack) {
+  const pc = makePc();
+  const sender = { track: seedTrack, replaceTrack: jest.fn() };
+  pc.getSenders = jest.fn(() => [sender]);
+  pc._sender = sender;
+  return pc;
+}
+
+test('setTransmitting(false) calls replaceTrack(null) on every audio sender', async () => {
+  const track = { kind: 'audio' };
+  const pc = makePcWithSenders(track);
+  RTCPeerConnection.mockImplementation(() => pc);
+  const signaling = makeSignaling();
+  const rtc = new WebRTCManager(signaling, jest.fn(), jest.fn(), jest.fn());
+  rtc.setMyId('peer-z');
+  rtc.localStream = { getAudioTracks: () => [track], getTracks: () => [track] };
+  await rtc.callPeer('peer-a');
+  pc._sender.replaceTrack.mockClear();
+
+  rtc.setTransmitting(false);
+  expect(pc._sender.replaceTrack).toHaveBeenCalledWith(null);
+
+  rtc.setTransmitting(true);
+  expect(pc._sender.replaceTrack).toHaveBeenLastCalledWith(track);
+  rtc.destroy();
+});
+
+test('callPeer respects a closed transmit gate by replacing the sender track with null', async () => {
+  // Regression guard: a peer joining while VOX has the gate closed must not
+  // start leaking the pre-gate audio frames.
+  const track = { kind: 'audio' };
+  const pc = makePcWithSenders(track);
+  RTCPeerConnection.mockImplementation(() => pc);
+  const signaling = makeSignaling();
+  const rtc = new WebRTCManager(signaling, jest.fn(), jest.fn(), jest.fn());
+  rtc.setMyId('peer-z');
+  rtc.localStream = { getAudioTracks: () => [track], getTracks: () => [track] };
+  // pc.addTrack must hand back the sender so callPeer can flip it to null.
+  pc.addTrack = jest.fn(() => pc._sender);
+  rtc.transmitting = false; // gate closed before peer joins
+
+  await rtc.callPeer('peer-a');
+  expect(pc._sender.replaceTrack).toHaveBeenCalledWith(null);
+  rtc.destroy();
+});
+
+test('live offer arriving during replay drain is routed onto the same chain', async () => {
+  // Regression guard for the parallel-race bug: a live offer arriving while
+  // setMyId() is draining the pendingOffers buffer must hand off onto the
+  // existing _replayChain rather than running in parallel on the same pc.
+  const pc = makePc();
+  RTCPeerConnection.mockImplementation(() => pc);
+  const signaling = makeSignaling();
+  const rtc = new WebRTCManager(signaling, jest.fn(), jest.fn(), jest.fn());
+
+  // Queue a buffered offer (no setMyId yet).
+  await rtc._handleOffer({ from: 'peer-b', sdp: { type: 'offer', sdp: 'queued' } });
+  expect(rtc.pendingOffers).toHaveLength(1);
+
+  // Make the buffered replay's setRemoteDescription block so we can race a
+  // live offer in while the chain is still draining.
+  let resolveBuffered;
+  pc.setRemoteDescription = jest.fn()
+    .mockImplementationOnce(() => new Promise((r) => { resolveBuffered = r; }))
+    .mockResolvedValue(undefined);
+
+  rtc.setMyId('peer-a');
+  await new Promise((r) => setImmediate(r));
+  // Replay chain is now installed and awaiting the blocked setRemoteDescription.
+  expect(rtc._replayChain).not.toBeNull();
+
+  // Live offer arrives during the drain. It MUST be routed onto the existing
+  // chain (no parallel pc creation, no concurrent setRemoteDescription).
+  const replayChainBefore = rtc._replayChain;
+  await rtc._handleOffer({ from: 'peer-c', sdp: { type: 'offer', sdp: 'live' } });
+  expect(rtc._replayChain).not.toBe(replayChainBefore); // chain extended
+
+  // Only the buffered offer's first setRemoteDescription should have started;
+  // the live one is queued behind it.
+  expect(pc.setRemoteDescription).toHaveBeenCalledTimes(1);
+
+  // Unblock and let the chain settle.
+  resolveBuffered();
+  await new Promise((r) => setImmediate(r));
+  await new Promise((r) => setImmediate(r));
+  rtc.destroy();
+});

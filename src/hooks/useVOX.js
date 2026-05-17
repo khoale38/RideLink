@@ -2,14 +2,10 @@
  * VOX (Voice-Activated Transmit)
  *
  * Both platforms monitor mic amplitude via react-native-audio-record (PCM
- * frames). iOS originally used WebRTC getStats() media-source audioLevel to
- * avoid opening a parallel mic capture, but that path is broken on the
- * current react-native-webrtc build: the loopback workaround needed to
- * populate stats for a solo host back-pressures iOS capture and freezes the
- * energy counter after ~0.75s. PCM via AudioToolbox sits alongside WebRTC's
- * PlayAndRecord AVAudioSession without conflict and gives a stable level.
+ * frames). On iOS, AudioToolbox sits alongside WebRTC's PlayAndRecord
+ * AVAudioSession without conflict and gives a stable per-frame level.
  *
- * Both paths normalize to dBFS so the threshold UI is identical:
+ * dBFS thresholds (UI-driven):
  *   -50 dB  = very sensitive (quiet room)
  *   -40 dB  = default (light wind / normal speech)
  *   -30 dB  = less sensitive (loud wind / highway)

@@ -70,6 +70,12 @@ const ICE_RESTART_BASE_MS = 500;
 const ICE_RESTART_MAX_MS = 30000;
 const ICE_RESTART_MAX_ATTEMPTS = 6;
 
+// Grace window before the first ICE restart on a 'disconnected' transition.
+// Brief radio drops are usually transient; restart=0 attempts gets this
+// instead of the exponential backoff so the link has time to recover on
+// its own. Subsequent flaps drop to the backoff schedule via restartAttempts.
+const DISCONNECT_GRACE_MS = 5000;
+
 // Bound the per-peer ICE buffer. Stale-epoch candidates after a polite-glare
 // rebuild are rejected non-fatally at flush time, so the worst case here is a
 // few benign warnings rather than a torn-down connection.
@@ -484,7 +490,7 @@ export class WebRTCManager {
         if (__DEV__) console.warn('[WebRTC] glare: ignoring offer from', msg.from, 'in', existing.pc.signalingState);
         // Re-arm the offer watchdog: glare means the polite peer will tear
         // down their pc and send us an answer to our ORIGINAL local offer.
-        // On slow links that round trip can exceed the initial 15s window —
+        // On slow links that round trip can exceed the initial OFFER_WATCHDOG_MS —
         // without this refresh, the watchdog would nuke a healthy in-flight
         // pc just as the polite peer's answer is on the wire.
         if (existing.pc.signalingState === 'have-local-offer') {
@@ -704,13 +710,12 @@ export class WebRTCManager {
       if (entry.closed) return;
       const state = pc.connectionState;
       // Unified restart scheduler. 'disconnected' is usually transient
-      // (brief radio drop) so the first hit waits a generous DISCONNECT_GRACE
+      // (brief radio drop) so the first hit waits a DISCONNECT_GRACE_MS
       // window before kicking a restart; 'failed' is definitively broken so
       // we go straight to the backoff schedule. Both paths consult the SAME
       // restartAttempts counter so an oscillating disconnected↔failed link
-      // can't reset the timer to the fixed 5s grace value and defeat the
+      // can't reset the timer to the fixed grace value and defeat the
       // exponential backoff on every flap.
-      const DISCONNECT_GRACE_MS = 5000;
       if (state === 'connecting' || state === 'new') {
         this.onPeerState?.(peerId, 'connecting');
       } else if (state === 'connected') {

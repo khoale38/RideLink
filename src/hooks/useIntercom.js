@@ -203,6 +203,13 @@ export function useIntercom(store, { onKicked } = {}) {
     const handlers = {};
 
     handlers.peer_list = ({ peers, yourId }) => {
+      // Defensive shape check. The signaling server validates inbound, but we
+      // don't trust it transitively — a buggy/older server or fuzzer could
+      // hand back a malformed peers array and crash the forEach below.
+      if (!Array.isArray(peers)) {
+        logger.warn('useIntercom', 'peer_list: malformed peers payload', { type: typeof peers });
+        return;
+      }
       storeRef.setMyId(yourId);
       // Snapshot the manager identity for this pass: a `reconnecting` event
       // arriving mid-iteration calls rtcRef.current.resetPeers(), which nulls
@@ -213,6 +220,7 @@ export function useIntercom(store, { onKicked } = {}) {
       const rtcAtStart = rtcRef.current;
       rtcAtStart?.setMyId(yourId);
       peers.forEach((p) => {
+        if (!p || typeof p.id !== 'string' || typeof p.name !== 'string') return;
         storeRef.addPeer({ id: p.id, name: p.name, speaking: false });
         if (rtcRef.current !== rtcAtStart) return; // reconnect swapped under us
         if (!rtcAtStart || rtcAtStart.myId !== yourId) return; // resetPeers ran
