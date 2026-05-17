@@ -5,6 +5,7 @@ import { WebRTCManager } from '../services/WebRTCManager';
 import { startSignalingServer, stopSignalingServer, SIGNALING_PORT } from '../services/SignalingServer';
 import {
   resolveGatewayIP,
+  resolveGatewayIPVerbose,
   requestLocationPermission,
   requestMicPermission,
   scanForRideLinkHotspot,
@@ -147,7 +148,15 @@ export function useIntercom(store, { onKicked } = {}) {
       }
 
       await startIntercomService(`RideLink (${name})`);
-      const gateway = await resolveGatewayIP();
+      const { gateway, source } = await resolveGatewayIPVerbose();
+      // 'fallback' means we have a WiFi IP but it didn't match a known
+      // hotspot subnet (e.g. dev on a corporate 10.x net). 'error' means
+      // WifiManager threw outright. In both cases the hardcoded gateway
+      // is almost certainly unreachable — surface that instead of timing
+      // out the TCP connect 20s later.
+      if (source !== 'wifi') {
+        throw new Error('Not connected to a RideLink hotspot. Connect to the host\'s WiFi first, then try again.');
+      }
       await _connect(gateway, name, store, {});
     } catch (err) {
       await _cleanupSession();
@@ -166,10 +175,19 @@ export function useIntercom(store, { onKicked } = {}) {
 
     handlers.peer_list = ({ peers, yourId }) => {
       storeRef.setMyId(yourId);
-      rtcRef.current?.setMyId(yourId);
+      // Snapshot the manager identity for this pass: a `reconnecting` event
+      // arriving mid-iteration calls rtcRef.current.resetPeers(), which nulls
+      // myId and wipes the peer map. Any callPeer fired after that point
+      // would race against the reset and add tracks to a soon-to-be-stale
+      // pc. Capture the manager up-front and bail per-peer if it's been
+      // swapped or cleared.
+      const rtcAtStart = rtcRef.current;
+      rtcAtStart?.setMyId(yourId);
       peers.forEach((p) => {
         storeRef.addPeer({ id: p.id, name: p.name, speaking: false });
-        rtcRef.current?.callPeer(p.id);
+        if (rtcRef.current !== rtcAtStart) return; // reconnect swapped under us
+        if (!rtcAtStart || rtcAtStart.myId !== yourId) return; // resetPeers ran
+        rtcAtStart.callPeer(p.id);
       });
       storeRef.setConnected(true);
     };

@@ -47,6 +47,15 @@ const JOIN_TIMEOUT_MS = 10000;
 const EMPTY_BUF = Buffer.alloc(0);
 
 let server = null;
+// Set to the in-flight stop promise while a stopSignalingServer() is
+// draining; null otherwise. A rapid leaveGroup → hostGroup sequence runs
+// the new listen() while the old close() callback is still pending;
+// without gating, the new server may bind successfully but race the FIN
+// of the old one inside the platform's socket bookkeeping. Using null
+// (rather than a settled Promise.resolve()) lets startSignalingServer
+// stay synchronous in the common case so tests and callers that observe
+// server creation immediately keep working.
+let pendingStop = null;
 const clients = new Map(); // clientId -> { socket, name, buffer, joined, isHost, joinTimer, remoteAddress }
 
 function _isLoopback(addr) {
@@ -60,6 +69,11 @@ function _isLoopback(addr) {
 
 export function startSignalingServer(onEvent) {
   if (server) return;
+  // If a previous stop is still draining, wait for it before binding. We
+  // resolve the start-fn synchronously (callers don't await it) but the
+  // actual listen() is gated behind pendingStop so a re-host can't trip
+  // EADDRINUSE against the still-closing listener.
+  const doStart = () => {
 
   server = TcpSocket.createServer((socket) => {
     const clientId = uuidv4();
@@ -138,6 +152,16 @@ export function startSignalingServer(onEvent) {
   server.listen({ port: SIGNALING_PORT, host: '0.0.0.0' }, () => {
     onEvent?.({ type: 'server_started', port: SIGNALING_PORT });
   });
+  };
+  // Synchronous common case: no in-flight stop, bind immediately so callers
+  // can observe `server` and start handling connections right away. Deferred
+  // case: an immediate re-host after leave — wait for the listener to actually
+  // release the port before binding the new one.
+  if (pendingStop) {
+    pendingStop.then(doStart, doStart);
+  } else {
+    doStart();
+  }
 }
 
 export function stopSignalingServer() {
@@ -178,7 +202,7 @@ export function stopSignalingServer() {
   // teardown and trip EADDRINUSE on the next listen().
   const closing = server;
   server = null;
-  return new Promise((resolve) => {
+  const stopPromise = new Promise((resolve) => {
     let settled = false;
     const done = () => { if (!settled) { settled = true; resolve(); } };
     try {
@@ -192,6 +216,11 @@ export function stopSignalingServer() {
     // at 1s so leaveGroup never hangs.
     setTimeout(done, 1000);
   });
+  pendingStop = stopPromise;
+  // Clear the gate once draining completes so the next start can run
+  // synchronously again.
+  stopPromise.then(() => { if (pendingStop === stopPromise) pendingStop = null; });
+  return stopPromise;
 }
 
 // Single choke point for client removal. Idempotent: flips `joined` to false

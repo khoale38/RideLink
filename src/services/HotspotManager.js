@@ -27,17 +27,33 @@ export function getGatewayIP() {
 // which matches every Android/iOS hotspot subnet we've seen. Falls back to
 // the hardcoded constant if the lookup fails or returns nothing usable.
 export async function resolveGatewayIP() {
+  return (await resolveGatewayIPVerbose()).gateway;
+}
+
+// Verbose variant for callers that want to know whether the gateway was
+// derived from a live WiFi IP or fell back to the hardcoded default — useful
+// for surfacing a clearer "you don't look connected to a hotspot" error in
+// the join flow (10.x.x.x corporate WiFi, no WiFi at all, etc.) instead of
+// trying 192.168.43.1 and timing out.
+export async function resolveGatewayIPVerbose() {
   try {
     const ip = await WifiManager.getIP();
     if (typeof ip === 'string') {
       const m = ip.match(/^(\d{1,3}\.\d{1,3}\.\d{1,3})\.\d{1,3}$/);
-      if (m) return `${m[1]}.1`;
+      if (m) return { gateway: `${m[1]}.1`, source: 'wifi', wifiIp: ip };
     }
-  } catch {
-    /* fall through to hardcoded default */
+    return { gateway: getGatewayIP(), source: 'fallback', wifiIp: ip ?? null };
+  } catch (err) {
+    return { gateway: getGatewayIP(), source: 'error', error: err };
   }
-  return getGatewayIP();
 }
+
+// Recommended polling cadence for `isIOSHotspotActive` on the Home screen.
+// Each call spins up a throw-away TCP listener and waits up to 1.5s for the
+// bind result — at 3s intervals the home screen was hammering the socket
+// layer. 8s is a usability-vs-cost compromise: a user toggling Personal
+// Hotspot in Settings will see the banner update within ~8s.
+export const IOS_HOTSPOT_POLL_MS = 8000;
 
 // iOS doesn't expose a Personal Hotspot API. We probe instead: when the
 // hotspot is active, iOS creates a bridge100 interface with the host IP

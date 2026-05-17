@@ -35,7 +35,13 @@ function App() {
   // - VOX off: always transmit
   // - VOX on: transmit only while VOX gate is open (vox.speaking)
   useEffect(() => {
-    const track = (localStream as any)?.getAudioTracks?.()[0];
+    // `localStream` comes back from react-native-webrtc as MediaStream-like;
+    // its TS surface in this repo is opaque (no @types), so a narrow shape
+    // cast is enough for the single field we touch. Better than `any` —
+    // anything outside `getAudioTracks` triggers a TS error if a refactor
+    // breaks the assumption.
+    type AudioStream = { getAudioTracks?: () => Array<{ enabled: boolean }> };
+    const track = (localStream as AudioStream | null)?.getAudioTracks?.()[0];
     if (!track) return;
     const desired = screen === 'group' && !store.muted && (!voxEnabled || vox.transmit);
     if (track.enabled !== desired) track.enabled = desired;
@@ -71,11 +77,20 @@ function App() {
   };
 
   const handleLeave = async () => {
+    if (busy) return;
+    // `busy` covers the full teardown window so a user tapping Host/Join
+    // immediately after Leave can't race a still-running stopSignalingServer
+    // / stopIntercomService. The session lock inside useIntercom serializes
+    // even if they do, but reflecting it in the UI state prevents the
+    // disabled-button flicker and the second Alert that would surface from
+    // a synchronously-rejected start.
+    setBusy(true);
     // Flip the screen first so the UI feels instantaneous; native teardown
     // continues in the background. Errors here are best-effort — leaveGroup
     // already swallows them internally.
     setScreen('home');
     try { await leaveGroup(); } catch (_) { /* best-effort */ }
+    finally { setBusy(false); }
   };
 
   // Keep the screen on whenever we're in a group — riders can't tap the screen

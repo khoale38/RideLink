@@ -6,7 +6,10 @@ import {
 import { SafeAreaView } from 'react-native-safe-area-context';
 import DeviceInfo from 'react-native-device-info';
 import InCallManager from 'react-native-incall-manager';
-import { requestMicPermission, isIOSHotspotActive } from '../services/HotspotManager';
+import { mediaDevices } from 'react-native-webrtc';
+import { AppState } from 'react-native';
+import { requestMicPermission, isIOSHotspotActive, IOS_HOTSPOT_POLL_MS } from '../services/HotspotManager';
+import { buildLoopbackPair } from '../services/MicLoopback';
 import {
   checkNotificationPermission,
   requestNotificationPermission,
@@ -77,13 +80,32 @@ export function HomeScreen({ onHost, onJoin, busy = false }) {
   useEffect(() => {
     if (Platform.OS !== 'ios') return undefined;
     let cancelled = false;
+    let id = null;
     const check = async () => {
       const on = await isIOSHotspotActive();
       if (!cancelled) setIosHotspotOn(on);
     };
-    check();
-    const id = setInterval(check, 3000);
-    return () => { cancelled = true; clearInterval(id); };
+    const start = () => {
+      if (id) return;
+      check();
+      id = setInterval(check, IOS_HOTSPOT_POLL_MS);
+    };
+    const stop = () => {
+      if (id) { clearInterval(id); id = null; }
+    };
+    start();
+    // Pause polling when the app is backgrounded — a probe every IOS_HOTSPOT
+    // _POLL_MS that spins up a throw-away TCP listener does no good for a
+    // user who can't see the UI.
+    const appStateSub = AppState.addEventListener('change', (state) => {
+      if (state === 'active') start();
+      else stop();
+    });
+    return () => {
+      cancelled = true;
+      stop();
+      appStateSub?.remove?.();
+    };
   }, []);
 
   const handleEnableNotif = async () => {
@@ -133,40 +155,12 @@ export function HomeScreen({ onHost, onJoin, busy = false }) {
         InCallManager.start({ media: 'audio' });
         InCallManager.setForceSpeakerphoneOn(true);
       } catch (_) { /* ignore — monitor still works, just quieter */ }
-      const { mediaDevices, RTCPeerConnection } = require('react-native-webrtc');
       const stream = await mediaDevices.getUserMedia({ audio: true });
       monitorStreamRef.current = stream;
 
-      const pcLocal = new RTCPeerConnection({ iceServers: [] });
-      const pcRemote = new RTCPeerConnection({ iceServers: [] });
+      const { pcLocal, pcRemote } = await buildLoopbackPair(stream, { audible: true });
       pcLocalRef.current = pcLocal;
       pcRemoteRef.current = pcRemote;
-
-      pcLocal.addEventListener('icecandidate', (e) => {
-        if (e.candidate) { try { pcRemote.addIceCandidate(e.candidate); } catch (_) { /* ignore */ } }
-      });
-      pcRemote.addEventListener('icecandidate', (e) => {
-        if (e.candidate) { try { pcLocal.addIceCandidate(e.candidate); } catch (_) { /* ignore */ } }
-      });
-
-      // react-native-webrtc routes remote audio to the earpiece by default,
-      // which sounds tiny. Crank the remote track gain via libwebrtc's
-      // AudioTrack.setVolume (accepts 0..10) so monitor playback is audible.
-      pcRemote.addEventListener('track', (e) => {
-        const track = e?.track;
-        if (track && typeof track._setVolume === 'function') {
-          try { track._setVolume(10); } catch (_) { /* ignore */ }
-        }
-      });
-
-      stream.getTracks().forEach((t) => pcLocal.addTrack(t, stream));
-
-      const offer = await pcLocal.createOffer({});
-      await pcLocal.setLocalDescription(offer);
-      await pcRemote.setRemoteDescription(offer);
-      const answer = await pcRemote.createAnswer();
-      await pcRemote.setLocalDescription(answer);
-      await pcLocal.setRemoteDescription(answer);
 
       // Poll local media-source audioLevel for the meter — works on both
       // iOS and Android without a second mic consumer.

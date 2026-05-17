@@ -88,6 +88,13 @@ const ICE_RESTART_MAX_ATTEMPTS = 6;
 // few benign warnings rather than a torn-down connection.
 const MAX_PENDING_CANDIDATES = 64;
 
+// Lifetime cap on local-stats loopback PC build attempts. The per-peer reset
+// in onconnectionstatechange / oniceconnectionstatechange resets the WINDOW
+// counter so a transiently failing path can retry once conditions improve,
+// but if the failure is permanent (broken native module, OS audio session
+// permanently wedged) the lifetime cap stops infinite retry rounds.
+const LOCAL_STATS_PC_LIFETIME_MAX = 12;
+
 // Per-peer state. One instance per (peerId, pc) lifetime — replaced wholesale
 // on glare-rebuild rather than mutated in place, so any in-flight operation
 // that captured the old entry can bail by checking `entry.closed` or by
@@ -129,6 +136,11 @@ export class WebRTCManager {
 
     this.localSpeaking = false;
     this.speakingPoll = null;
+    // Lifetime tally of _localStatsPc build attempts, independent of the
+    // window counter `_localStatsPcAttempts` that resets on peer connect.
+    // Together they let transient failures retry while permanent failures
+    // give up.
+    this._localStatsPcLifetimeAttempts = 0;
     // Offers that arrived before setMyId() — replayed once we know our id so
     // the glare tie-break in _handleOffer is symmetric on both peers.
     this.pendingOffers = [];
@@ -172,6 +184,13 @@ export class WebRTCManager {
     };
     const tick = async () => {
       if (this.destroyed) return;
+      // Mark the running tick so destroy() can await it. A long native
+      // getStats() call can otherwise outlive destroy() and fire UI
+      // callbacks against a torn-down store / dispatch setState after
+      // unmount.
+      let resolveRunning;
+      this._tickRunning = new Promise((r) => { resolveRunning = r; });
+      try {
       let localLevel = 0;
       // Always read our own mic level from the local-only stats pc — that way
       // a solo host (peers.size === 0) still sees a non-zero audioLevel and
@@ -224,6 +243,11 @@ export class WebRTCManager {
         logger.warn('WebRTC', `speaking poll cadence → ${nextMs}ms`, { peers: this.peers.size });
       }
       schedule(nextMs);
+      } finally {
+        const r = resolveRunning;
+        this._tickRunning = null;
+        r?.();
+      }
     };
     schedule(currentMs);
   }
@@ -249,7 +273,15 @@ export class WebRTCManager {
     if (this.pendingOffers.length) {
       const queued = this.pendingOffers;
       this.pendingOffers = [];
-      queued.forEach((msg) => { this._handleOffer(msg); });
+      // Serialize the replay so a fast real-time offer that races in while
+      // we're applying a buffered one can't interleave setRemoteDescription
+      // / createAnswer awaits on the same pc. Each replay completes before
+      // the next starts; any live offer arriving meanwhile is handled by
+      // the regular handlers.offer wrapper after this chain resolves.
+      this._replayChain = queued.reduce(
+        (p, msg) => p.then(() => this._handleOffer(msg)).catch(() => {}),
+        Promise.resolve(),
+      );
     }
   }
 
@@ -298,6 +330,10 @@ export class WebRTCManager {
     const MAX_BUILD_ATTEMPTS = 3;
     while (!this._localStatsPc && this.localStream && !this.destroyed) {
       if ((this._localStatsPcAttempts ?? 0) >= MAX_BUILD_ATTEMPTS) return;
+      // Lifetime cap: prevents a permanent failure (broken native module,
+      // permanently wedged audio session) from looping forever even after
+      // a peer briefly connects and resets the window counter.
+      if (this._localStatsPcLifetimeAttempts >= LOCAL_STATS_PC_LIFETIME_MAX) return;
       // In-flight guard: concurrent startLocalAudio calls (e.g. reconnect
       // race) would otherwise each build a loopback pc pair; the first
       // assignment would be orphaned with no close() ever called. Share the
@@ -309,6 +345,7 @@ export class WebRTCManager {
         continue;
       }
       this._localStatsPcAttempts = (this._localStatsPcAttempts ?? 0) + 1;
+      this._localStatsPcLifetimeAttempts += 1;
       this._localStatsPcSetup = this._buildLocalStatsPc();
       try {
         await this._localStatsPcSetup;
@@ -492,8 +529,28 @@ export class WebRTCManager {
     }
   }
 
+  // Defensive shape validation. The signaling server validates inbound, but
+  // we don't want to trust it transitively — a buggy/older peer or fuzzer
+  // could still produce something that throws inside the WebRTC constructors
+  // and crash the handler. Belt-and-suspenders.
+  _isValidSdpMsg(msg) {
+    const sdp = msg?.sdp;
+    return !!sdp && typeof sdp === 'object'
+      && typeof sdp.type === 'string'
+      && typeof sdp.sdp === 'string';
+  }
+  _isValidIceMsg(msg) {
+    const cand = msg?.candidate;
+    if (cand === null) return true; // end-of-candidates sentinel
+    return !!cand && typeof cand === 'object' && typeof cand.candidate === 'string';
+  }
+
   async _handleOffer(msg) {
     if (this.destroyed) return;
+    if (!this._isValidSdpMsg(msg)) {
+      this._reportError('handleOffer.shape', new Error('malformed offer payload'), msg?.from, /* fatal */ false);
+      return;
+    }
 
     // Glare tie-break needs our own id. If an offer arrives before peer_list
     // has set it (rare race on first join), buffer until setMyId() replays.
@@ -553,6 +610,13 @@ export class WebRTCManager {
       // session will be rejected by the WebRTC stack on flush (logged
       // non-fatally), so the worst case is a few harmless warnings.
       preserved = existing.pendingCandidates;
+      // Cap preserved size — a peer that flooded candidates before the
+      // glare rebuild shouldn't be allowed to skip MAX_PENDING_CANDIDATES
+      // simply because the buffer is carried across an SDP epoch. Keep
+      // the most recent (highest-likelihood-still-relevant) entries.
+      if (preserved.length > MAX_PENDING_CANDIDATES) {
+        preserved = preserved.slice(-MAX_PENDING_CANDIDATES);
+      }
       this._removePeer(msg.from);
     }
 
@@ -586,6 +650,10 @@ export class WebRTCManager {
 
   async _handleAnswer(msg) {
     if (this.destroyed) return;
+    if (!this._isValidSdpMsg(msg)) {
+      this._reportError('handleAnswer.shape', new Error('malformed answer payload'), msg?.from, /* fatal */ false);
+      return;
+    }
     const entry = this.peers.get(msg.from);
     if (!entry) return;
     // A late/stray answer (e.g. arriving after glare resolution swapped our
@@ -625,6 +693,10 @@ export class WebRTCManager {
 
   async _handleIceCandidate(msg) {
     if (this.destroyed) return;
+    if (!this._isValidIceMsg(msg)) {
+      this._reportError('handleIceCandidate.shape', new Error('malformed ice_candidate payload'), msg?.from, /* fatal */ false);
+      return;
+    }
     const entry = this.peers.get(msg.from);
     if (!entry || !msg.candidate) return;
     // If the pc has no remote description yet (e.g. the polite-glare path
@@ -876,10 +948,20 @@ export class WebRTCManager {
     handlers.ice_candidate = (msg) => { safeCall('ice_candidate', prevIce, msg); this._handleIceCandidate(msg); };
   }
 
-  destroy() {
+  // Async to await any in-flight stats tick before tearing down the store
+  // callbacks / pcs. Callers may invoke without `await` (synchronous fire-
+  // and-forget teardown is still safe — destroyed=true gates every callback)
+  // but awaiting guarantees no late safeNotify can dispatch into a freshly
+  // unmounted React tree.
+  async destroy() {
     if (this.destroyed) return;
     this.destroyed = true;
     this._stopSpeakingPoll();
+    // Wait out any running tick so its trailing safeNotify can't fire into
+    // a torn-down store. _tickRunning resolves in tick's `finally`.
+    if (this._tickRunning) {
+      try { await this._tickRunning; } catch (_) { /* tick swallows its own errors */ }
+    }
     this.peers.forEach((entry) => {
       entry.closed = true;
       if (entry.disconnectTimer) clearTimeout(entry.disconnectTimer);

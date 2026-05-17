@@ -1,5 +1,41 @@
 import { useState, useCallback } from 'react';
 
+/**
+ * Public shape contract for the group store. App.tsx and the WebRTCManager
+ * embed this — keep in sync if you add a setter below.
+ *
+ * @typedef {Object} Peer
+ * @property {string} id
+ * @property {string} name
+ * @property {boolean} speaking
+ * @property {'connecting'|'connected'|'failed'} [connectionState]
+ *
+ * @typedef {Object} GroupStore
+ * @property {string} myName
+ * @property {(name: string) => void} setMyName
+ * @property {string|null} myId
+ * @property {(id: string|null) => void} setMyId
+ * @property {Peer[]} peers
+ * @property {(peer: Partial<Peer> & {id: string, name: string}) => void} addPeer
+ * @property {(id: string) => void} removePeer
+ * @property {() => void} clearPeers
+ * @property {(id: string, speaking: boolean) => void} setPeerSpeaking
+ * @property {(id: string, state: 'connecting'|'connected'|'failed') => void} setPeerConnectionState
+ * @property {'host'|'guest'|null} role
+ * @property {(role: 'host'|'guest'|null) => void} setRole
+ * @property {boolean} connected
+ * @property {(c: boolean) => void} setConnected
+ * @property {boolean} muted
+ * @property {(m: boolean) => void} setMuted
+ * @property {string} hotspotPassword
+ * @property {(p: string) => void} setHotspotPassword
+ * @property {string} hotspotSsid
+ * @property {(s: string) => void} setHotspotSsid
+ * @property {boolean} selfSpeaking
+ * @property {(s: boolean) => void} setSelfSpeaking
+ * @property {() => void} reset
+ */
+
 // Simple in-memory state — no Redux needed at this stage
 export function useGroupStore() {
   const [myName, setMyName] = useState('');
@@ -46,16 +82,26 @@ export function useGroupStore() {
     setPeers([]);
   }, []);
 
+  // Hot-path setters used by the WebRTC speaking-poll (~300ms cadence). Skip
+  // the state update entirely when the value is unchanged so React doesn't
+  // re-render the peer list on every tick — even an O(n) map+spread that
+  // produces an equal-shape array still costs render passes across the
+  // GroupScreen subtree. The early-exit "return prev" tells React to keep
+  // the existing reference and bail.
   const setPeerSpeaking = useCallback((id, speaking) => {
-    setPeers((prev) =>
-      prev.map((p) => (p.id === id ? { ...p, speaking } : p)),
-    );
+    setPeers((prev) => {
+      const existing = prev.find((p) => p.id === id);
+      if (!existing || existing.speaking === speaking) return prev;
+      return prev.map((p) => (p.id === id ? { ...p, speaking } : p));
+    });
   }, []);
 
   const setPeerConnectionState = useCallback((id, connectionState) => {
-    setPeers((prev) =>
-      prev.map((p) => (p.id === id ? { ...p, connectionState } : p)),
-    );
+    setPeers((prev) => {
+      const existing = prev.find((p) => p.id === id);
+      if (!existing || existing.connectionState === connectionState) return prev;
+      return prev.map((p) => (p.id === id ? { ...p, connectionState } : p));
+    });
   }, []);
 
   // Canonical full-reset: clear every field that varies per session. Called

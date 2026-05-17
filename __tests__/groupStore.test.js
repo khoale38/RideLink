@@ -65,6 +65,30 @@ test('reset clears role, peers, hotspot info, but preserves myName', () => {
   expect(result.current.myName).toBe('Khoa');
 });
 
+test('setPeerSpeaking preserves the peers array reference when value is unchanged', () => {
+  // Hot-path perf: WebRTC's speaking poll fires every ~300ms; if setPeers
+  // produced a new array on every tick (even when nothing changed), every
+  // child of GroupScreen would re-render at 3+ Hz with N peers. The setter
+  // must early-exit so React sees the same reference and skips the render.
+  const { result } = renderHook(() => useGroupStore());
+  act(() => { result.current.addPeer({ id: 'p1', name: 'Alice' }); });
+  act(() => { result.current.setPeerSpeaking('p1', true); });
+  const ref1 = result.current.peers;
+  act(() => { result.current.setPeerSpeaking('p1', true); }); // same value
+  expect(result.current.peers).toBe(ref1);
+  act(() => { result.current.setPeerSpeaking('p1', false); }); // changed
+  expect(result.current.peers).not.toBe(ref1);
+});
+
+test('setPeerConnectionState preserves the peers array reference when value is unchanged', () => {
+  const { result } = renderHook(() => useGroupStore());
+  act(() => { result.current.addPeer({ id: 'p1', name: 'Alice' }); });
+  act(() => { result.current.setPeerConnectionState('p1', 'connected'); });
+  const ref1 = result.current.peers;
+  act(() => { result.current.setPeerConnectionState('p1', 'connected'); });
+  expect(result.current.peers).toBe(ref1);
+});
+
 test('removePeer is a no-op for unknown ids', () => {
   const { result } = renderHook(() => useGroupStore());
   act(() => { result.current.addPeer({ id: 'p1', name: 'Alice' }); });

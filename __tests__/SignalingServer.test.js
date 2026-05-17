@@ -27,7 +27,11 @@ let connectionHandler = null;
 const serverInstance = {
   on: jest.fn(),
   listen: jest.fn((opts, cb) => cb && cb()),
-  close: jest.fn(),
+  // Fire the close callback synchronously so SignalingServer's `pendingStop`
+  // resolves immediately in tests — without this, the next test's
+  // startSignalingServer is queued behind the unresolved stop promise and
+  // module state stays mid-teardown.
+  close: jest.fn((cb) => { if (typeof cb === 'function') cb(); }),
 };
 
 beforeEach(() => {
