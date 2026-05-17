@@ -274,7 +274,13 @@ export function useIntercom(store, { onKicked } = {}) {
       onKickedRef.current?.('connection_lost');
     };
 
-    const client = new SignalingClient(host, SIGNALING_PORT, handlers);
+    // Host's loopback client must NOT auto-reconnect: if the local server
+    // ever drops, the host is already tearing down and a reconnect chase
+    // would either kick the host via gave_up → onKicked('connection_lost')
+    // or fight the in-flight teardown.
+    const client = new SignalingClient(host, SIGNALING_PORT, handlers, {
+      disableReconnect: !!opts.isHost,
+    });
     signalingRef.current = client;
 
     const rtc = new WebRTCManager(
@@ -296,13 +302,18 @@ export function useIntercom(store, { onKicked } = {}) {
       setLocalStream(stream);
       client.send({ type: 'join', name, isHost: !!opts.isHost });
     } catch (err) {
-      // Full teardown so a half-init manager (no stream, stats pc not stood
-      // up) isn't left in rtcRef AND any native resource the outer caller
-      // already started (foreground service, hotspot, signaling server) is
-      // awaited shut. The outer hostGroup/joinGroup catch also calls
-      // leaveGroup, but routing through the shared primitive here keeps
-      // future callers of _connect from leaking those resources.
-      await _cleanupSession({ resetStore: false });
+      // Tear down only what _connect constructed locally. The outer
+      // hostGroup/joinGroup catch always runs _cleanupSession, so doing it
+      // here too would double-stop the foreground service / hotspot /
+      // signaling server. Idempotency saves us, but the duplicate calls
+      // are wasted work — and a future non-idempotent teardown step would
+      // be a silent footgun. We still null the refs so the outer cleanup
+      // can't reach into a half-built manager.
+      try { client.disconnect(); } catch (_) { /* ignore */ }
+      try { await (rtc.destroy?.() ?? Promise.resolve()); } catch (_) { /* ignore */ }
+      signalingRef.current = null;
+      rtcRef.current = null;
+      setLocalStream(null);
       throw err;
     }
   }

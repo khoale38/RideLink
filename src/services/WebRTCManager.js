@@ -230,11 +230,13 @@ export class WebRTCManager {
   // signaling reconnect re-establishes this ordering naturally without
   // replaying a stale buffer from the prior session.
   setMyId(id) {
-    // Idempotent against double-call: the reconnect path can fire setMyId
-    // twice for the same yourId (peer_list re-broadcast on a fresh socket).
-    // resetPeers() clears pendingOffers AND nulls this.myId, so a genuine
-    // re-set always sees a different id; same-id calls are bookkeeping noise.
-    if (this.myId === id) return;
+    // Always assign and always check pendingOffers. We previously short-
+    // circuited on `this.myId === id`, but if the signaling server ever
+    // reissues the same id across a reconnect (free to do so — uuid v4
+    // makes it unlikely but not impossible), the early return would skip
+    // the pending-offer replay and the rider would silently miss buffered
+    // offers. Reassigning the same value is a no-op; draining the queue
+    // when it's empty is also a no-op — both safe.
     this.myId = id;
     if (this.pendingOffers.length) {
       const queued = this.pendingOffers;

@@ -28,6 +28,14 @@ const SHARED = globalThis.__RIDELINK_AUDIO_RECORDER__ ?? (globalThis.__RIDELINK_
   initialized: false,
   running: false,
   listenerAttached: false,
+  // Monotonic ownership token. Recorder is a singleton across Fast Refresh,
+  // so two concurrent callers (e.g. transient HomeScreen→GroupScreen render
+  // overlap, two useVOX hooks alive at once) could otherwise clobber each
+  // other: the second's start() takes the listener, and the first's
+  // cleanup stop()s the live session. Each caller acquires() a token; only
+  // the current owner's setListener/start/stop have effect.
+  ownerToken: 0,
+  nextToken: 0,
 });
 
 function ensureListenerAttached() {
@@ -39,27 +47,40 @@ function ensureListenerAttached() {
 }
 
 export const Recorder = {
-  configure(options) {
+  // Acquire ownership. Preempts any prior owner — their subsequent
+  // setListener/start/stop calls become no-ops, so a stale cleanup from
+  // the previous owner can't tear down the new session.
+  acquire() {
+    SHARED.nextToken += 1;
+    SHARED.ownerToken = SHARED.nextToken;
+    return SHARED.ownerToken;
+  },
+
+  configure(options, token) {
     if (!RNAudioRecord) return;
+    if (token !== undefined && token !== SHARED.ownerToken) return;
     RNAudioRecord.init(options);
     SHARED.initialized = true;
     ensureListenerAttached();
   },
 
-  setListener(fn) {
+  setListener(fn, token) {
+    if (token !== undefined && token !== SHARED.ownerToken) return;
     SHARED.currentListener = fn;
   },
 
-  start() {
+  start(token) {
     if (!RNAudioRecord || !SHARED.initialized) return false;
+    if (token !== undefined && token !== SHARED.ownerToken) return false;
     if (SHARED.running) return true;
     RNAudioRecord.start();
     SHARED.running = true;
     return true;
   },
 
-  stop() {
+  stop(token) {
     if (!RNAudioRecord || !SHARED.running) return;
+    if (token !== undefined && token !== SHARED.ownerToken) return;
     try { RNAudioRecord.stop(); } catch (_) { /* ignore */ }
     SHARED.running = false;
   },

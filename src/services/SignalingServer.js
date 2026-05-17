@@ -156,7 +156,24 @@ export function startSignalingServer(onEvent) {
     });
   });
 
+  // Bind-retry on EADDRINUSE. The 1s cap on the stop drain (below) means
+  // a rapid leave→host can land here while the kernel still holds the port
+  // in TIME_WAIT or is finishing the FIN handshake. Retry a few times with
+  // a short backoff before surfacing the error.
+  let bindAttempt = 0;
+  const MAX_BIND_ATTEMPTS = 5;
+  const BIND_RETRY_MS = 300;
+
   server.on('error', (err) => {
+    const code = err?.code || err?.errno;
+    if (code === 'EADDRINUSE' && bindAttempt < MAX_BIND_ATTEMPTS) {
+      bindAttempt += 1;
+      if (__DEV__) console.warn(`[SignalingServer] EADDRINUSE, retry ${bindAttempt}/${MAX_BIND_ATTEMPTS} in ${BIND_RETRY_MS}ms`);
+      setTimeout(() => {
+        try { server?.listen({ port: SIGNALING_PORT, host: '0.0.0.0' }); } catch (_) { /* surfaces via next error event */ }
+      }, BIND_RETRY_MS);
+      return;
+    }
     if (__DEV__) console.warn('[SignalingServer] server error:', err?.message ?? err);
     onEvent?.({ type: 'server_error', error: err });
   });
@@ -225,8 +242,10 @@ export function stopSignalingServer() {
     }
     // Belt-and-suspenders: react-native-tcp-socket's close() callback isn't
     // guaranteed to fire if there are no active connections. Cap the wait
-    // at 1s so leaveGroup never hangs.
-    setTimeout(done, 1000);
+    // at 3s so leaveGroup never hangs — the EADDRINUSE bind-retry in
+    // startSignalingServer covers the case where the port hasn't actually
+    // released by the time we hand control to the next caller.
+    setTimeout(done, 3000);
   });
   // Chain onto any existing pendingStop so a rapid stop→start→stop cascade
   // serializes correctly — overwriting pendingStop unconditionally would

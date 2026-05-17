@@ -146,31 +146,39 @@ export function useVOX(localStream, enabled = true) {
           }
         }, 8000)
       : null;
+    // Acquire ownership of the singleton Recorder for this effect run.
+    // Preempts any prior owner — their cleanup will see a stale token and
+    // skip the stop(), so the live session keeps running. Our cleanup
+    // passes the same token so it only tears down if we still own it.
+    const token = Recorder.acquire();
     try {
       // Recorder state lives on globalThis (survives Fast Refresh / hook
       // remount). A prior session that didn't reach its cleanup could leave
       // `running` true; force-stop here so start() reliably re-arms the
-      // native capture rather than no-oping.
+      // native capture rather than no-oping. We just acquired the token so
+      // these calls are authorized.
       // Clear the listener BEFORE stopping so an in-flight frame from the
       // prior session can't fire one last onSample() against the new
       // session's closures (calibrationActive / thresholdRef captured by
       // this effect's scope). Then stop the recorder itself.
-      try { Recorder.setListener(null); } catch (_) { /* ignore */ }
-      try { Recorder.stop(); } catch (_) { /* ignore */ }
+      try { Recorder.setListener(null, token); } catch (_) { /* ignore */ }
+      try { Recorder.stop(token); } catch (_) { /* ignore */ }
       Recorder.configure({
         sampleRate: SAMPLE_RATE,
         channels: CHANNELS,
         bitsPerSample: BITS_PER_SAMPLE,
         wavFile: '',
-      });
-      Recorder.setListener((data) => onSample(_rmsDb(data)));
-      Recorder.start();
+      }, token);
+      Recorder.setListener((data) => onSample(_rmsDb(data)), token);
+      Recorder.start(token);
       let stopped = false;
       stopRecorder = () => {
         if (stopped) return;
         stopped = true;
-        try { Recorder.setListener(null); } catch (_) { /* ignore */ }
-        try { Recorder.stop(); } catch (_) { /* ignore */ }
+        // Token-guarded: if another useVOX has preempted us, these become
+        // no-ops and we leave the new owner's session running.
+        try { Recorder.setListener(null, token); } catch (_) { /* ignore */ }
+        try { Recorder.stop(token); } catch (_) { /* ignore */ }
       };
     } catch (err) {
       if (__DEV__) console.warn('[VOX] failed to start AudioRecord:', err?.message ?? err);

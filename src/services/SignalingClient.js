@@ -24,10 +24,16 @@ const MAX_LINE_BYTES = 32 * 1024;
 const MAX_RECONNECT_ATTEMPTS = 10;
 
 export class SignalingClient {
-  constructor(host, port, handlers) {
+  constructor(host, port, handlers, opts = {}) {
     this.host = host;
     this.port = port;
     this.handlers = handlers;
+    // Loopback path (host phone connecting to its own embedded server) sets
+    // this. If the loopback ever disconnects the embedded server is gone,
+    // which means the host is already tearing down — auto-reconnect would
+    // chase a server we just stopped, and the gave_up path would surface as
+    // onKicked('connection_lost'), kicking the host from their own room.
+    this.disableReconnect = !!opts.disableReconnect;
     this.socket = null;
     this.buffer = Buffer.alloc(0);
     this.connected = false;
@@ -216,6 +222,7 @@ export class SignalingClient {
   }
 
   _scheduleReconnect() {
+    if (this.disableReconnect) return;
     if (this.intentionallyClosed || this.gaveUp) return;
     if (!this.everConnected) return;        // initial connect failed → let caller decide
     if (this.reconnectTimer) return;        // already scheduled

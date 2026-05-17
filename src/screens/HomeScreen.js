@@ -49,6 +49,12 @@ export function HomeScreen({ onHost, onJoin, busy = false }) {
   const pcLocalRef = useRef(null);
   const pcRemoteRef = useRef(null);
   const statsTimerRef = useRef(null);
+  // Monotonic mic-test session id. Bumped on every start() and stop() so an
+  // in-flight handleMicTest can detect that its session was cancelled while
+  // awaiting getUserMedia / buildLoopbackPair and stop the resources it
+  // acquired itself, instead of orphaning them in refs that stopMicTest
+  // already cleared.
+  const micTestSessionRef = useRef(0);
   // Tracks whether THIS screen acquired the InCallManager session. Without it,
   // tapping mic-test then immediately tapping Host queues the unmount cleanup
   // to run InCallManager.stop() *after* useIntercom.hostGroup has acquired the
@@ -128,6 +134,10 @@ export function HomeScreen({ onHost, onJoin, busy = false }) {
   };
 
   const stopMicTest = () => {
+    // Invalidate any in-flight handleMicTest session so its post-await
+    // resumption tears down whatever it acquired locally instead of writing
+    // into refs we just nulled.
+    micTestSessionRef.current += 1;
     // Only touch InCallManager if WE acquired it. Otherwise the unmount
     // cleanup (fired when navigating to GroupScreen after Host/Join) would
     // call stop() against a session useIntercom is actively using for the
@@ -158,6 +168,13 @@ export function HomeScreen({ onHost, onJoin, busy = false }) {
   const handleMicTest = async () => {
     if (micTesting) { stopMicTest(); return; }
 
+    // Snapshot the session id at start. Each await below re-checks against
+    // the live ref; a mismatch means stopMicTest() (or unmount cleanup)
+    // ran while we were waiting, so anything we just acquired is ours to
+    // clean up — stopMicTest already nulled the refs before we landed here.
+    const mySession = ++micTestSessionRef.current;
+    const isStale = () => micTestSessionRef.current !== mySession;
+
     setMicTesting(true);
     setMicLevel(0);
     try {
@@ -168,9 +185,23 @@ export function HomeScreen({ onHost, onJoin, busy = false }) {
         incallActiveRef.current = true;
       } catch (_) { /* ignore — monitor still works, just quieter */ }
       const stream = await mediaDevices.getUserMedia({ audio: true });
+      if (isStale()) {
+        try { stream.getTracks().forEach((t) => t.stop()); } catch (_) { /* ignore */ }
+        return;
+      }
       monitorStreamRef.current = stream;
 
       const { pcLocal, pcRemote } = await buildLoopbackPair(stream, { audible: true });
+      if (isStale()) {
+        try { pcLocal?.close(); } catch (_) { /* ignore */ }
+        try { pcRemote?.close(); } catch (_) { /* ignore */ }
+        try { stream.getTracks().forEach((t) => t.stop()); } catch (_) { /* ignore */ }
+        // stopMicTest already nulled monitorStreamRef, but the assignment
+        // above re-installed our (now-orphaned) stream. Clear it so the
+        // next start() doesn't see a stale stream pointing at stopped tracks.
+        if (monitorStreamRef.current === stream) monitorStreamRef.current = null;
+        return;
+      }
       pcLocalRef.current = pcLocal;
       pcRemoteRef.current = pcRemote;
 
