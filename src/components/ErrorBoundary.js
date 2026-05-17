@@ -32,8 +32,14 @@ export class ErrorBoundary extends React.Component {
   }
 
   reset = () => {
-    this.setState({ error: null });
+    // Order matters: fire onReset() FIRST so the parent can swap the screen
+    // (which unmounts this boundary entirely). Clearing `error` before the
+    // parent reroutes would briefly re-render the still-torn child tree —
+    // a render-time crash would re-throw the next tick and put us right
+    // back into the error state. The setState below is the fallback for
+    // when the parent's reset is purely in-place (no unmount).
     try { this.props.onReset?.(); } catch (_) { /* ignore */ }
+    this.setState({ error: null });
   };
 
   render() {

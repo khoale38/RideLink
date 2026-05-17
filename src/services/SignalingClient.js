@@ -99,6 +99,13 @@ export class SignalingClient {
             // replay the join into a session the caller has already torn
             // down. disconnect() already destroyed the prior socket, but a
             // freshly-opened socket here would otherwise be orphaned.
+            //
+            // Note: we don't reset reconnectAttempt / everConnected here.
+            // `intentionallyClosed=true` gates _scheduleReconnect at line
+            // ~192, so the ladder won't fire again regardless of those
+            // counters. If you ever clear intentionallyClosed without
+            // also resetting the counters, the ladder may resume from
+            // mid-attempt — route through connect() to reset both.
             if (this.intentionallyClosed || this.gaveUp) {
               try { this.socket?.removeAllListeners?.(); } catch (_) { /* ignore */ }
               try { this.socket?.destroy(); } catch (_) { /* ignore */ }
@@ -218,7 +225,13 @@ export class SignalingClient {
       this.reconnectTimer = null;
       if (this.intentionallyClosed || this.gaveUp) return;
       this._openSocket().catch(() => {
-        // _openSocket's error handler already schedules the next attempt
+        // _openSocket's error path normally schedules the next attempt via
+        // the 'error' listener's markDead(). But a synchronous throw from
+        // TcpSocket.createConnection (broken native, OS resource starvation)
+        // never installs that listener — `finish(err)` runs and the promise
+        // rejects with no markDead invocation. Re-arm the ladder here so a
+        // transient sync failure doesn't silently end reconnect attempts.
+        this._scheduleReconnect();
       });
     }, delay);
   }

@@ -270,6 +270,11 @@ export class WebRTCManager {
   // signaling reconnect re-establishes this ordering naturally without
   // replaying a stale buffer from the prior session.
   setMyId(id) {
+    // Idempotent against double-call: the reconnect path can fire setMyId
+    // twice for the same yourId (peer_list re-broadcast on a fresh socket).
+    // resetPeers() clears pendingOffers AND nulls this.myId, so a genuine
+    // re-set always sees a different id; same-id calls are bookkeeping noise.
+    if (this.myId === id) return;
     this.myId = id;
     if (this.pendingOffers.length) {
       const queued = this.pendingOffers;
@@ -281,17 +286,25 @@ export class WebRTCManager {
       // onto the same chain via _handleOffer's `_replayChain` check below —
       // without that hand-off, a live offer could parallel-race the buffered
       // one for the same peer on the same pc.
-      this._replayChain = queued.reduce(
+      this._setReplayChain(queued.reduce(
         (p, msg) => p.then(() => this._handleOffer(msg, { fromReplay: true })).catch(() => {}),
         Promise.resolve(),
-      );
-      // Resolve _replayChain to null when complete so destroy() can stop
-      // awaiting it and live-offer routing falls back to the direct path.
-      const finalize = this._replayChain;
-      finalize.then(() => {
-        if (this._replayChain === finalize) this._replayChain = null;
-      });
+      ));
     }
+  }
+
+  // Single seam for installing a new _replayChain. Attaches the nullify
+  // finalizer so the chain reference doesn't leak after the promise
+  // settles. The live-offer routing path in _handleOffer also goes through
+  // here — without that, a live-offer reassignment would orphan _replayChain
+  // (the original finalizer's identity check fails, and no new finalizer is
+  // attached on the reassignment), leaving _replayChain pinned forever and
+  // forcing every subsequent offer onto the slow chained path.
+  _setReplayChain(chain) {
+    this._replayChain = chain;
+    chain.then(() => {
+      if (this._replayChain === chain) this._replayChain = null;
+    });
   }
 
   async startLocalAudio() {
@@ -566,8 +579,8 @@ export class WebRTCManager {
     // on the same pc. `fromReplay` short-circuits the recursion when the
     // chain itself is invoking us.
     if (this._replayChain && !opts.fromReplay) {
-      const chain = this._replayChain;
-      this._replayChain = chain.then(() => this._handleOffer(msg, { fromReplay: true })).catch(() => {});
+      const prior = this._replayChain;
+      this._setReplayChain(prior.then(() => this._handleOffer(msg, { fromReplay: true })).catch(() => {}));
       return;
     }
 
@@ -984,10 +997,14 @@ export class WebRTCManager {
     // Symmetric with _tickRunning: the buffered-offer replay chain (built in
     // setMyId) holds references to _handleOffer that could still wake up
     // pcs we're about to close. Each replay early-exits on destroyed=true,
-    // but awaiting here lets the chain settle deterministically.
-    if (this._replayChain) {
-      try { await this._replayChain; } catch (_) { /* replay errors are swallowed */ }
-      this._replayChain = null;
+    // but awaiting here lets the chain settle deterministically. Loop
+    // until stable null because a live offer routed onto the chain during
+    // the await (sibling handler firing on the signaling socket before
+    // disconnect() lands) re-assigns _replayChain to a new promise.
+    while (this._replayChain) {
+      const chain = this._replayChain;
+      try { await chain; } catch (_) { /* replay errors are swallowed */ }
+      if (this._replayChain === chain) this._replayChain = null;
     }
     this.peers.forEach((entry) => {
       entry.closed = true;

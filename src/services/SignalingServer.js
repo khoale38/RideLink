@@ -9,6 +9,9 @@ import { logger } from './logger';
 
 // Crypto-strong v4 UUID. Relies on the `react-native-get-random-values`
 // polyfill imported in index.js so `crypto.getRandomValues` is available.
+// Bitwise ops below are RFC 4122 v4 UUID required encoding (version + variant
+// bits in fixed positions); not a code smell.
+/* eslint-disable no-bitwise */
 function uuidv4() {
   const bytes = new Uint8Array(16);
   // eslint-disable-next-line no-undef
@@ -29,6 +32,7 @@ function uuidv4() {
   const hex = Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('');
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
 }
+/* eslint-enable no-bitwise */
 
 export const SIGNALING_PORT = 8765;
 // Cap per-client receive buffer. Any single signaling message is well under

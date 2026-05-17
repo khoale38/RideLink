@@ -790,6 +790,47 @@ test('malformed offer payload is rejected without crashing', async () => {
   rtc.destroy();
 });
 
+test('setMyId is idempotent against double-call with the same id', async () => {
+  // Reconnect paths can fire setMyId twice for the same yourId; the second
+  // call must not re-enter the replay path (pendingOffers is already empty
+  // but the no-op early-exit makes the contract explicit).
+  const pc = makePc();
+  RTCPeerConnection.mockImplementation(() => pc);
+  const signaling = makeSignaling();
+  const rtc = new WebRTCManager(signaling, jest.fn(), jest.fn(), jest.fn(), jest.fn());
+  rtc.setMyId('peer-a');
+  expect(rtc.myId).toBe('peer-a');
+  // Mutate to detect a re-run (would be cleared by a real setMyId path).
+  rtc.pendingOffers.push({ from: 'peer-b', sdp: { type: 'offer', sdp: 'x' } });
+  rtc.setMyId('peer-a');
+  // Second call should be a no-op — pendingOffers stays as we placed it.
+  expect(rtc.pendingOffers).toHaveLength(1);
+  rtc.destroy();
+});
+
+test('_replayChain nullifies after live-offer re-assignment', async () => {
+  // Bug: prior version only attached the finalizer to the original chain
+  // identity, so a live-offer routing reassignment left _replayChain pinned
+  // forever once the original resolved. _setReplayChain re-arms on each
+  // assignment.
+  const pc = makePc();
+  RTCPeerConnection.mockImplementation(() => pc);
+  const signaling = makeSignaling();
+  const rtc = new WebRTCManager(signaling, jest.fn(), jest.fn(), jest.fn(), jest.fn());
+  // Queue a buffered offer so setMyId installs a real _replayChain.
+  await rtc._handleOffer({ from: 'peer-b', sdp: { type: 'offer', sdp: 'x' } });
+  rtc.setMyId('peer-a');
+  expect(rtc._replayChain).not.toBeNull();
+  // Route a live offer onto the chain BEFORE the original resolves.
+  rtc._handleOffer({ from: 'peer-c', sdp: { type: 'offer', sdp: 'y' } });
+  // Flush all microtasks.
+  await new Promise((r) => setImmediate(r));
+  await new Promise((r) => setImmediate(r));
+  await new Promise((r) => setImmediate(r));
+  expect(rtc._replayChain).toBeNull();
+  rtc.destroy();
+});
+
 test('preserved candidate buffer is capped on glare rebuild', async () => {
   const existing = makePc({ signalingState: 'have-local-offer' });
   const fresh = makePc();

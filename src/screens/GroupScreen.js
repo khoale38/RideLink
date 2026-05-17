@@ -1,4 +1,4 @@
-import React, { useCallback, useMemo } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   View, Text, TouchableOpacity, FlatList, StyleSheet,
   Platform, Switch,
@@ -17,8 +17,12 @@ function suggestSSID(name) {
 
 // Empirically, mesh audio holds up to ~5 riders on phone hotspots before CPU
 // and bandwidth start to bite. Past this we warn the host; we don't hard-cap
-// because the right number depends on hardware and signal.
-const MESH_SOFT_LIMIT = 5;
+// because the right number depends on hardware and signal. Hysteresis below
+// (warn at 6, clear at 4) prevents the orange banner from flickering on/off
+// as a peer briefly bounces around the boundary.
+const MESH_SOFT_LIMIT_ON = 6;  // riders count (inclusive) that arms the warning
+const MESH_SOFT_LIMIT_OFF = 4; // riders count at which the warning clears
+const MESH_SOFT_LIMIT = MESH_SOFT_LIMIT_OFF + 1; // for display text only
 
 const STATE_LABEL = {
   connecting: 'connecting…',
@@ -55,9 +59,12 @@ const RiderRow = React.memo(function RiderRow({ item }) {
 });
 
 function RiderList({ myName, peers, isSpeaking }) {
-  // Memoize the data array so the FlatList sees a stable reference when
-  // unrelated state churns (mute toggle, VOX slider). The dep set is
-  // exactly the inputs to the array shape.
+  // The real per-tick perf win is `React.memo(RiderRow)` skipping rows
+  // whose item shape is unchanged. This useMemo only stabilizes against
+  // mute / VOX-slider churn — the `peers` array identity changes every
+  // speaking-poll tick (groupStore returns a fresh array on any update),
+  // so `data` itself does get a new reference each tick. That's fine:
+  // FlatList does its own per-item compare via React.memo.
   const data = useMemo(
     () => [
       { id: 'me', name: `${myName} (you)`, speaking: isSpeaking, isMe: true },
@@ -89,6 +96,17 @@ export function GroupScreen({ store, vox, voxEnabled, onToggleVox, onMuteToggle,
   const activeSSID = hotspotSsid || suggestSSID(myName);
   const activePassword = hotspotPassword || '';
 
+  // Latching state for the mesh-size warning. Arm at >=6, clear at <=4 so
+  // a flapping peer at the boundary doesn't toggle the orange banner every
+  // few seconds. The two thresholds are far enough apart to absorb churn
+  // without hiding a real overload condition.
+  const riderCount = peers.length + 1;
+  const [meshWarn, setMeshWarn] = useState(false);
+  useEffect(() => {
+    if (riderCount >= MESH_SOFT_LIMIT_ON) setMeshWarn(true);
+    else if (riderCount <= MESH_SOFT_LIMIT_OFF) setMeshWarn(false);
+  }, [riderCount]);
+
   return (
     <SafeAreaView style={styles.container} edges={['top', 'bottom', 'left', 'right']}>
 
@@ -106,7 +124,7 @@ export function GroupScreen({ store, vox, voxEnabled, onToggleVox, onMuteToggle,
             <View style={styles.hotspotText}>
               <Text style={styles.hotspotLabel}>Hotspot name</Text>
               <Text style={styles.hotspotValue}>{activeSSID}</Text>
-              <Text style={[styles.hotspotLabel, { marginTop: 6 }]}>Password</Text>
+              <Text style={[styles.hotspotLabel, styles.hotspotLabelSpaced]}>Password</Text>
               <Text style={styles.hotspotValue}>{activePassword}</Text>
               <Text style={styles.iosNote}>
                 {Platform.OS === 'ios'
@@ -129,8 +147,8 @@ export function GroupScreen({ store, vox, voxEnabled, onToggleVox, onMuteToggle,
       )}
 
       {/* Rider list */}
-      <Text style={styles.sectionLabel}>RIDERS ({peers.length + 1})</Text>
-      {peers.length + 1 > MESH_SOFT_LIMIT && (
+      <Text style={styles.sectionLabel}>RIDERS ({riderCount})</Text>
+      {meshWarn && (
         <Text style={styles.meshWarning}>
           Audio may degrade above {MESH_SOFT_LIMIT} riders — WebRTC mesh scales O(N²).
         </Text>
@@ -238,6 +256,7 @@ const styles = StyleSheet.create({
   hotspotRow: { flexDirection: 'row', alignItems: 'flex-start' },
   hotspotText: { flex: 1, paddingRight: 10 },
   hotspotLabel: { color: '#888', fontSize: 12 },
+  hotspotLabelSpaced: { marginTop: 6 },
   hotspotValue: { color: '#fff', fontWeight: '700', fontSize: 14 },
   iosNote: { color: '#f5a623', fontSize: 11, marginTop: 6 },
   qrWrapper: { alignItems: 'center' },

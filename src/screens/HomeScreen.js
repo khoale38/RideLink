@@ -10,10 +10,7 @@ import { mediaDevices } from 'react-native-webrtc';
 import { AppState } from 'react-native';
 import { requestMicPermission, isIOSHotspotActive, IOS_HOTSPOT_POLL_MS } from '../services/HotspotManager';
 import { buildLoopbackPair } from '../services/MicLoopback';
-import {
-  checkNotificationPermission,
-  requestNotificationPermission,
-} from '../services/IntercomService';
+import { requestNotificationPermission } from '../services/IntercomService';
 
 // audioLevel from getStats() is 0..1 (linear amplitude); map to 0..1 fill with
 // a mild curve so quiet speech still moves the bar visibly.
@@ -189,7 +186,7 @@ export function HomeScreen({ onHost, onJoin, busy = false }) {
   };
 
   // Clean up mic monitor if screen unmounts
-  useEffect(() => () => { stopMicTest(); }, []); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => () => { stopMicTest(); }, []);
 
   const handleEnableMic = async () => {
     if (requestingMic) return;
