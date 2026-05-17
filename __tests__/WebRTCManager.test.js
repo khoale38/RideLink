@@ -808,6 +808,25 @@ test('setMyId is idempotent against double-call with the same id', async () => {
   rtc.destroy();
 });
 
+test('destroy() awaits the replay chain and leaves _replayChain null', async () => {
+  // Loop-await is symmetric with _tickRunning and lets a chain reassigned
+  // mid-await (live-offer routing) still settle before pcs close. Each
+  // _handleOffer bails on this.destroyed=true; destroy() loop-awaits until
+  // _replayChain is stable null.
+  const pc = makePc();
+  RTCPeerConnection.mockImplementation(() => pc);
+  const signaling = makeSignaling();
+  const rtc = new WebRTCManager(signaling, jest.fn(), jest.fn(), jest.fn(), jest.fn());
+  // Buffer two offers so setMyId installs a multi-step chain.
+  await rtc._handleOffer({ from: 'peer-b', sdp: { type: 'offer', sdp: 'x' } });
+  await rtc._handleOffer({ from: 'peer-c', sdp: { type: 'offer', sdp: 'y' } });
+  rtc.setMyId('peer-a');
+  expect(rtc._replayChain).not.toBeNull();
+  await rtc.destroy();
+  expect(rtc._replayChain).toBeNull();
+  expect(rtc.destroyed).toBe(true);
+});
+
 test('_replayChain nullifies after live-offer re-assignment', async () => {
   // Bug: prior version only attached the finalizer to the original chain
   // identity, so a live-offer routing reassignment left _replayChain pinned

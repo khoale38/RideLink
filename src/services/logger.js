@@ -69,9 +69,13 @@ export const logger = {
     breadcrumbHook?.({ level: 'error', scope, err, extra });
   },
 
-  // Diagnostic — only in dev.
+  // Diagnostic — only in dev. Dedupe-key-aware like warn() so a chatty
+  // call site (per-peer per-tick speaking-poll info, etc.) can throttle
+  // itself by passing a stable key. Without this, a multi-hour QA build
+  // (__DEV__=true) can balloon RN's in-memory log buffer (LogBox/Flipper).
   info(scope, message, extra) {
     if (LEVELS.info < minLevel) return;
+    if (!shouldEmit(extra?.dedupeKey)) return;
     if (__DEV__) {
       console.log(`[${scope}] ${message}`, extra ?? '');
     }

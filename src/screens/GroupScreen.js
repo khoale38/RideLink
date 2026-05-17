@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useState } from 'react';
 import {
   View, Text, TouchableOpacity, FlatList, StyleSheet,
   Platform, Switch,
@@ -59,19 +59,15 @@ const RiderRow = React.memo(function RiderRow({ item }) {
 });
 
 function RiderList({ myName, peers, isSpeaking }) {
-  // The real per-tick perf win is `React.memo(RiderRow)` skipping rows
-  // whose item shape is unchanged. This useMemo only stabilizes against
-  // mute / VOX-slider churn — the `peers` array identity changes every
-  // speaking-poll tick (groupStore returns a fresh array on any update),
-  // so `data` itself does get a new reference each tick. That's fine:
-  // FlatList does its own per-item compare via React.memo.
-  const data = useMemo(
-    () => [
-      { id: 'me', name: `${myName} (you)`, speaking: isSpeaking, isMe: true },
-      ...peers,
-    ],
-    [myName, isSpeaking, peers],
-  );
+  // No useMemo on `data`: every poll tick changes `peers` (groupStore
+  // returns a fresh array on speaking updates), so the deps would always
+  // miss anyway. The real per-tick perf win is `React.memo(RiderRow)`
+  // which skips rows whose item shape is unchanged. FlatList's data ref
+  // changing each tick is fine — it walks keyExtractor + per-row memo.
+  const data = [
+    { id: 'me', name: `${myName} (you)`, speaking: isSpeaking, isMe: true },
+    ...peers,
+  ];
   const renderItem = useCallback(({ item }) => <RiderRow item={item} />, []);
   const keyExtractor = useCallback((item) => item.id, []);
   return (
@@ -101,7 +97,10 @@ export function GroupScreen({ store, vox, voxEnabled, onToggleVox, onMuteToggle,
   // few seconds. The two thresholds are far enough apart to absorb churn
   // without hiding a real overload condition.
   const riderCount = peers.length + 1;
-  const [meshWarn, setMeshWarn] = useState(false);
+  // Lazy initializer: if the screen mounts already past the soft limit
+  // (deep-link, hot reload, fast join), the banner shows on the very first
+  // frame instead of waiting one tick for the effect below to flip it on.
+  const [meshWarn, setMeshWarn] = useState(() => riderCount >= MESH_SOFT_LIMIT_ON);
   useEffect(() => {
     if (riderCount >= MESH_SOFT_LIMIT_ON) setMeshWarn(true);
     else if (riderCount <= MESH_SOFT_LIMIT_OFF) setMeshWarn(false);

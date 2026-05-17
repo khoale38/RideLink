@@ -294,17 +294,21 @@ export class WebRTCManager {
   }
 
   // Single seam for installing a new _replayChain. Attaches the nullify
-  // finalizer so the chain reference doesn't leak after the promise
-  // settles. The live-offer routing path in _handleOffer also goes through
-  // here — without that, a live-offer reassignment would orphan _replayChain
-  // (the original finalizer's identity check fails, and no new finalizer is
-  // attached on the reassignment), leaving _replayChain pinned forever and
-  // forcing every subsequent offer onto the slow chained path.
+  // finalizer (via `.then(fin, fin)`) so the chain reference doesn't leak
+  // after the promise settles — and so a rejected chain doesn't surface
+  // as an unhandled-rejection warning even if a future caller forgets the
+  // upstream `.catch(()=>{})`. The live-offer routing path in _handleOffer
+  // also goes through here — without it, a live-offer reassignment would
+  // orphan _replayChain (the original finalizer's identity check fails,
+  // and no new finalizer is attached on the reassignment), leaving
+  // _replayChain pinned forever and forcing every subsequent offer onto
+  // the slow chained path.
   _setReplayChain(chain) {
     this._replayChain = chain;
-    chain.then(() => {
+    const finalize = () => {
       if (this._replayChain === chain) this._replayChain = null;
-    });
+    };
+    chain.then(finalize, finalize);
   }
 
   async startLocalAudio() {

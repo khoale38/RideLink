@@ -44,10 +44,17 @@ export class SignalingClient {
   }
 
   connect() {
-    // Reset the reconnect ladder so an instance that previously hit gave_up
-    // can be reused: clear the latch, drop any pending timer, zero the
-    // attempt counter. Without this, the next failure would immediately
-    // re-fire gave_up because the counter is still at MAX.
+    // Single seam for resuming the reconnect ladder. Both flags and the
+    // attempt counter must move together — clearing intentionallyClosed
+    // without zeroing reconnectAttempt would let a fresh connect()
+    // immediately fire gave_up if the prior session had topped out. The
+    // _resetReconnectLadder helper exists so a future maintainer can't
+    // forget one half of the pair (see CONTRACT comment in _openSocket).
+    this._resetReconnectLadder();
+    return this._openSocket();
+  }
+
+  _resetReconnectLadder() {
     this.intentionallyClosed = false;
     this.gaveUp = false;
     this.reconnectAttempt = 0;
@@ -55,7 +62,6 @@ export class SignalingClient {
       clearTimeout(this.reconnectTimer);
       this.reconnectTimer = null;
     }
-    return this._openSocket();
   }
 
   _openSocket() {
@@ -225,12 +231,15 @@ export class SignalingClient {
       this.reconnectTimer = null;
       if (this.intentionallyClosed || this.gaveUp) return;
       this._openSocket().catch(() => {
-        // _openSocket's error path normally schedules the next attempt via
-        // the 'error' listener's markDead(). But a synchronous throw from
-        // TcpSocket.createConnection (broken native, OS resource starvation)
-        // never installs that listener — `finish(err)` runs and the promise
-        // rejects with no markDead invocation. Re-arm the ladder here so a
-        // transient sync failure doesn't silently end reconnect attempts.
+        // _openSocket's async error path schedules the next attempt via
+        // the 'error' listener's markDead() — by the time we land here,
+        // a reconnectTimer is already set (or another error is in-flight).
+        // The guard at the top of _scheduleReconnect short-circuits on
+        // `if (this.reconnectTimer) return`, so calling it again is safe
+        // and idempotent. This re-arm covers the rare path where
+        // _openSocket rejects WITHOUT having installed an 'error' listener
+        // (e.g. TcpSocket.createConnection throwing synchronously); the
+        // double-call is intentional and guard-protected.
         this._scheduleReconnect();
       });
     }, delay);

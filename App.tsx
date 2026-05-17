@@ -126,9 +126,11 @@ function App() {
     // backoff. We swallow the rejection here so it doesn't surface as an
     // unhandled-promise warning during the teardown window.
     try {
-      const p = leaveGroupRef.current();
-      if (p && typeof p.catch === 'function') p.catch(() => {});
-    } catch { /* ignore */ }
+      // leaveGroup is always async (declared async in useIntercom). Swallow
+      // any rejection so the unmount window doesn't surface an unhandled-
+      // promise warning while React tears down.
+      leaveGroupRef.current().catch(() => {});
+    } catch { /* synchronous throw during teardown — ignore */ }
   }, []);
 
   return (
@@ -139,7 +141,13 @@ function App() {
       ) : (
         <ErrorBoundary
           onError={() => { /* fall through to onReset for teardown */ }}
-          onReset={() => { handleLeave(); }}
+          onReset={() => {
+            // handleLeave is async; the pre-await prefix (setBusy, setScreen)
+            // can throw sync and ErrorBoundary.reset's try/catch only catches
+            // sync throws — wrap the promise too so a rejection from the
+            // awaited leaveGroup() doesn't surface as unhandled.
+            try { handleLeave().catch(() => {}); } catch { /* ignore */ }
+          }}
         >
           <GroupScreen
             store={store}
