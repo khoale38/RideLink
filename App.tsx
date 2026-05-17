@@ -11,7 +11,7 @@ import { ErrorBoundary } from './src/components/ErrorBoundary';
 
 function App() {
   const store = useGroupStore();
-  const { hostGroup, joinGroup, leaveGroup, toggleMute, localStream, localLevelRef } = useIntercom(store, {
+  const { hostGroup, joinGroup, leaveGroup, toggleMute, localStream, localLevelRef, setTransmitting } = useIntercom(store, {
     onKicked: async (reason: 'host_closed_room' | 'connection_lost') => {
       // Await teardown so a user tapping Host/Join immediately after the alert
       // dismisses doesn't race a still-running signaling server / FG service.
@@ -31,22 +31,18 @@ function App() {
 
   const vox = useVOX(localStream, screen === 'group' && voxEnabled && !store.muted, localLevelRef);
 
-  // Single source of truth for whether the mic audio track is transmitting.
+  // Single source of truth for whether outbound mic audio reaches peers.
   // - muted: never transmit
   // - VOX off: always transmit
-  // - VOX on: transmit only while VOX gate is open (vox.speaking)
+  // - VOX on: transmit only while VOX gate is open (vox.transmit)
+  //
+  // We gate at the peer-sender level (replaceTrack) rather than on the source
+  // track. Disabling the source would zero out media-source audioLevel and
+  // deadlock VOX — level=0 forever → gate never opens → border never lights.
   useEffect(() => {
-    // `localStream` comes back from react-native-webrtc as MediaStream-like;
-    // its TS surface in this repo is opaque (no @types), so a narrow shape
-    // cast is enough for the single field we touch. Better than `any` —
-    // anything outside `getAudioTracks` triggers a TS error if a refactor
-    // breaks the assumption.
-    type AudioStream = { getAudioTracks?: () => Array<{ enabled: boolean }> };
-    const track = (localStream as AudioStream | null)?.getAudioTracks?.()[0];
-    if (!track) return;
     const desired = screen === 'group' && !store.muted && (!voxEnabled || vox.transmit);
-    if (track.enabled !== desired) track.enabled = desired;
-  }, [localStream, screen, store.muted, voxEnabled, vox.transmit]);
+    setTransmitting(desired);
+  }, [localStream, screen, store.muted, voxEnabled, vox.transmit, setTransmitting]);
 
   const handleHost = async (name: string) => {
     if (busy) return;

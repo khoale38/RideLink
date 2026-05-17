@@ -107,8 +107,16 @@ export function startSignalingServer(onEvent) {
 
       let nl;
       while ((nl = entry.buffer.indexOf(0x0a)) !== -1) {
-        const lineBuf = entry.buffer.subarray(0, nl);
-        entry.buffer = entry.buffer.subarray(nl + 1);
+        // React Native's `buffer` polyfill returns a plain Uint8Array from
+        // .subarray (not a Buffer), so its .toString('utf8') silently falls
+        // back to TypedArray.prototype.toString — producing "123,34,116,…"
+        // instead of decoded UTF-8. Re-wrap with Buffer.from so the encoding
+        // argument is actually honored. Mirrors the same wrap in the buffer
+        // tail-trim below.
+        const rawSlice = entry.buffer.subarray(0, nl);
+        const lineBuf = Buffer.isBuffer(rawSlice) ? rawSlice : Buffer.from(rawSlice);
+        const tailSlice = entry.buffer.subarray(nl + 1);
+        entry.buffer = Buffer.isBuffer(tailSlice) ? tailSlice : Buffer.from(tailSlice);
         if (lineBuf.length > MAX_LINE_BYTES) {
           logger.warn('SignalingServer', 'oversized message dropped — closing client', { clientId, bytes: lineBuf.length });
           _cleanupClient(clientId, 'oversized_line', onEvent);

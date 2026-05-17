@@ -19,10 +19,15 @@
  *    answer. Without a peer, a solo host's "speaking" indicator stays dark
  *    and VOX calibration never completes.
  *    REMEDY: handshake against an in-process companion pc so the stats path
- *    is hot. The companion's received track is muted twice (event-time AND
- *    via getReceivers pre-loop) because some builds start auto-playing
+ *    is hot. The companion's received track is disabled twice (event-time
+ *    AND via getReceivers pre-loop) because some builds start auto-playing
  *    decoded audio between setLocalDescription(answer) and the 'track'
- *    event firing, causing the rider to hear themselves.
+ *    event firing, causing the rider to hear themselves and the mic to
+ *    feed back through the speaker. We use track.enabled = false rather
+ *    than _setVolume(0); the latter isn't wired through to remote tracks
+ *    in this build (silent no-op), causing full-volume feedback. Empirically
+ *    media-source.audioLevel still reports real levels with the receiver
+ *    disabled on the SENDER side of the pair.
  *    RETIREMENT CHECK: solo-host VOX lights up with a single pc and only
  *    setLocalDescription called.
  *
@@ -136,6 +141,14 @@ export class WebRTCManager {
 
     this.localSpeaking = false;
     this.speakingPoll = null;
+    // Per-peer transmit gate. The local source track stays enabled at all
+    // times so _localStatsPc's media-source audioLevel keeps reporting real
+    // levels — VOX needs that signal to decide when to OPEN the gate, so
+    // gating the source itself would deadlock (level=0 → VOX never fires →
+    // gate never opens). Instead we toggle each peer pc's audio sender via
+    // replaceTrack(null|track) so only outbound transmission is gated; the
+    // self-speaking indicator and VOX calibration keep working.
+    this.transmitting = true;
     // Lifetime tally of _localStatsPc build attempts, independent of the
     // window counter `_localStatsPcAttempts` that resets on peer connect.
     // Together they let transient failures retry while permanent failures
@@ -166,7 +179,12 @@ export class WebRTCManager {
     // 4 peers to keep CPU/battery in check on large group rides.
     const fastMs = 300;
     const slowMs = 600;
-    const SPEAKING_THRESHOLD = 0.01; // audioLevel is 0..1 — anything noisy
+    // audioLevel is 0..1, but on iOS react-native-webrtc reports values an
+    // order of magnitude lower than the spec (post-AGC normalization), so
+    // a -40 dB threshold corresponds to ~0.003 not 0.01. Empirically, normal
+    // speech peaks at 0.005–0.02 on this build; 0.003 covers quiet speakers
+    // without tripping on the noise floor (typically < 0.001).
+    const SPEAKING_THRESHOLD = 0.003;
     let currentMs = fastMs;
     const schedule = (ms) => {
       currentMs = ms;
@@ -230,7 +248,15 @@ export class WebRTCManager {
           }
         } catch (_) { /* getStats can throw mid-teardown; ignore */ }
       }
-      const localSpeaking = localLevel >= SPEAKING_THRESHOLD;
+      // Hold the speaking flag on for a short window after the last loud
+      // sample so the border doesn't flicker off between syllables — the
+      // 300ms poll cadence is slower than typical word gaps, so without this
+      // every pause flipped speaking back to false. Mirrors the HOLD_MS
+      // strategy in useVOX.
+      const HOLD_MS = 600;
+      const now = Date.now();
+      if (localLevel >= SPEAKING_THRESHOLD) this._lastLocalLoudAt = now;
+      const localSpeaking = (this._lastLocalLoudAt ?? 0) + HOLD_MS > now;
       if (this.localSpeaking !== localSpeaking) {
         this.localSpeaking = localSpeaking;
         safeNotify(this.onLocalVoiceActivity, 'onLocalVoiceActivity', localSpeaking);
@@ -320,6 +346,14 @@ export class WebRTCManager {
           autoGainControl: true,
         },
         video: false,
+      });
+      const track = this.localStream?.getAudioTracks?.()[0];
+      logger.info('WebRTCManager', 'getUserMedia ok', {
+        hasTrack: !!track,
+        enabled: track?.enabled,
+        muted: track?.muted,
+        readyState: track?.readyState,
+        label: track?.label,
       });
       await this._ensureLocalStatsPc();
       return this.localStream;
@@ -419,10 +453,14 @@ export class WebRTCManager {
       });
       // Critical: the loopback handshake makes pcRemote auto-play the received
       // audio through the device speaker (same path the mic test uses on
-      // purpose). Without silencing it, the rider would hear themselves and
-      // the playback would feed back into the mic. Setting `enabled = false`
-      // is the spec-compliant way to suppress playback while keeping the
-      // sender's stats path alive.
+      // purpose). Without silencing it, the rider hears themselves and the
+      // playback feeds back into the mic — pegging media-source.audioLevel
+      // permanently high and making "speaking" always-on. We tried
+      // _setVolume(0) but the function isn't present on remote tracks in
+      // this react-native-webrtc build, so it silently no-ops. track.enabled
+      // = false is what works empirically: media-source on the SENDER side
+      // still reports real levels (verified by VOX calibration succeeding
+      // at -41 dB noise floor with this setting).
       pcRemote.addEventListener?.('track', (e) => {
         const track = e?.track;
         if (track) {
@@ -437,8 +475,11 @@ export class WebRTCManager {
       // Disable any received tracks BEFORE the answer is set — on some
       // react-native-webrtc builds the platform starts routing decoded audio
       // to the device speaker as soon as setLocalDescription(answer) runs,
-      // which is earlier than the 'track' event in step below. Doing it here
-      // closes the few-ms loopback window.
+      // which is earlier than the 'track' event below. Doing it here closes
+      // the few-ms loopback window. See the 'track' listener above for why
+      // we use track.enabled = false (despite the theoretical risk of
+      // halting media-source) instead of _setVolume — the latter isn't
+      // wired through to the receiver in this build.
       try {
         pcRemote.getReceivers?.().forEach((r) => {
           if (r?.track) { try { r.track.enabled = false; } catch (_) { /* ignore */ } }
@@ -456,6 +497,27 @@ export class WebRTCManager {
     }
   }
 
+  // Gate outbound transmission per-peer without disabling the source track,
+  // so the self-speaking indicator / VOX level path stays alive even when the
+  // gate is closed. Audible monitor (_localStatsPc) is intentionally NOT
+  // touched — it must always see the live source.
+  setTransmitting(enabled) {
+    this.transmitting = !!enabled;
+    const track = this.localStream?.getAudioTracks?.()[0];
+    for (const [, entry] of this.peers) {
+      try {
+        const senders = entry.pc.getSenders?.() ?? [];
+        for (const s of senders) {
+          if (s.track && s.track.kind !== 'audio') continue;
+          // Some senders start with track === null (transceivers added before
+          // addTrack); only flip audio senders we own.
+          try { s.replaceTrack?.(this.transmitting ? (track ?? null) : null); }
+          catch (err) { this._reportError('setTransmitting.replaceTrack', err, entry.id, /* fatal */ false); }
+        }
+      } catch (_) { /* ignore */ }
+    }
+  }
+
   async callPeer(peerId) {
     if (this.destroyed) return;
     // Skip if we already have a connection in progress / established — prevents
@@ -465,7 +527,14 @@ export class WebRTCManager {
     const entry = this._createPeerConnection(peerId);
     if (!entry) return;
     try {
-      this.localStream?.getTracks().forEach((t) => entry.pc.addTrack(t, this.localStream));
+      this.localStream?.getTracks().forEach((t) => {
+        const sender = entry.pc.addTrack(t, this.localStream);
+        // If the rider is currently gated closed (VOX silent / muted), start
+        // this sender with no track so we don't leak the pre-gate frames.
+        if (!this.transmitting && t.kind === 'audio') {
+          try { sender?.replaceTrack?.(null); } catch (_) { /* ignore */ }
+        }
+      });
       const offer = await entry.pc.createOffer();
       if (!this._isFresh(peerId, entry)) return;
       await entry.pc.setLocalDescription(offer);
@@ -664,7 +733,14 @@ export class WebRTCManager {
     // can't leave the pc parked in 'have-remote-offer' forever.
     this._armOfferWatchdog(entry);
     try {
-      this.localStream?.getTracks().forEach((t) => entry.pc.addTrack(t, this.localStream));
+      this.localStream?.getTracks().forEach((t) => {
+        const sender = entry.pc.addTrack(t, this.localStream);
+        // Mirror callPeer: respect the current transmit gate so a rejoin
+        // mid-silence doesn't accidentally start sending.
+        if (!this.transmitting && t.kind === 'audio') {
+          try { sender?.replaceTrack?.(null); } catch (_) { /* ignore */ }
+        }
+      });
       await entry.pc.setRemoteDescription(new RTCSessionDescription(msg.sdp));
       // Identity guard: a glare-rebuild or _removePeer during the awaits may
       // have swapped or evicted this entry. Mirrors the guards in callPeer /

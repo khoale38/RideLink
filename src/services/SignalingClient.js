@@ -155,8 +155,13 @@ export class SignalingClient {
 
         let nl;
         while ((nl = this.buffer.indexOf(0x0a)) !== -1) {
-          const lineBuf = this.buffer.subarray(0, nl);
-          this.buffer = this.buffer.subarray(nl + 1);
+          // See SignalingServer for why we re-wrap: React Native's buffer
+          // polyfill returns a plain Uint8Array from .subarray, so toString
+          // would otherwise produce comma-joined byte values instead of UTF-8.
+          const rawSlice = this.buffer.subarray(0, nl);
+          const lineBuf = Buffer.isBuffer(rawSlice) ? rawSlice : Buffer.from(rawSlice);
+          const tailSlice = this.buffer.subarray(nl + 1);
+          this.buffer = Buffer.isBuffer(tailSlice) ? tailSlice : Buffer.from(tailSlice);
           if (lineBuf.length > MAX_LINE_BYTES) {
             logger.warn('Signaling', 'oversized message from host — dropping connection');
             try { this.socket?.destroy(); } catch (_) { /* ignore */ }

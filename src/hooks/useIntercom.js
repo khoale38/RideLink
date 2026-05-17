@@ -1,5 +1,6 @@
 import { useRef, useCallback, useEffect, useState } from 'react';
 import { Platform } from 'react-native';
+import InCallManager from 'react-native-incall-manager';
 import { SignalingClient } from '../services/SignalingClient';
 import { WebRTCManager } from '../services/WebRTCManager';
 import { startSignalingServer, stopSignalingServer, SIGNALING_PORT } from '../services/SignalingServer';
@@ -51,6 +52,10 @@ export function useIntercom(store, { onKicked } = {}) {
   const _cleanupSession = useCallback(async ({ resetStore } = { resetStore: true }) => {
     // Disconnect signaling FIRST so any in-flight handlers (offer/answer/ice)
     // can't call into a half-destroyed WebRTC manager.
+    // Release the iOS audio session we acquired for the group call. Safe on
+    // Android (no-op) and idempotent if we never started it.
+    try { InCallManager.setForceSpeakerphoneOn(false); } catch (_) { /* ignore */ }
+    try { InCallManager.stop(); } catch (_) { /* ignore */ }
     try { signalingRef.current?.disconnect(); } catch (_) { /* ignore */ }
     // destroy() is async (it awaits any in-flight stats tick + replay chain
     // so trailing safeNotify calls can't fire into a torn-down store). Kick
@@ -92,6 +97,15 @@ export function useIntercom(store, { onKicked } = {}) {
     try {
       const micOk = await requestMicPermission();
       if (!micOk) throw new Error('Microphone permission denied');
+
+      // Configure AVAudioSession (PlayAndRecord + speaker) BEFORE getUserMedia.
+      // Without this, iOS can hand back a track whose capture is silent because
+      // the session category defaults to one that doesn't permit recording.
+      // No-op on Android.
+      try {
+        InCallManager.start({ media: 'audio', auto: true });
+        InCallManager.setForceSpeakerphoneOn(true);
+      } catch (_) { /* best-effort — fall through and surface failure later */ }
 
       store.setRole('host');
       store.setMyName(name);
@@ -144,6 +158,12 @@ export function useIntercom(store, { onKicked } = {}) {
       }
       const micOk = await requestMicPermission();
       if (!micOk) throw new Error('Microphone permission denied');
+
+      // See hostGroup — configure iOS audio session for capture + speaker out.
+      try {
+        InCallManager.start({ media: 'audio', auto: true });
+        InCallManager.setForceSpeakerphoneOn(true);
+      } catch (_) { /* best-effort */ }
 
       store.setRole('guest');
       store.setMyName(name);
@@ -297,5 +317,13 @@ export function useIntercom(store, { onKicked } = {}) {
     }
   }
 
-  return { hostGroup, joinGroup, leaveGroup, toggleMute, localStream, localLevelRef };
+  // App.tsx routes VOX/mute decisions through here so the gate is applied
+  // per-peer via sender.replaceTrack rather than on the source track itself.
+  // Gating the source would zero out media-source audioLevel and deadlock VOX
+  // (level stuck at 0 → never detects speech → gate never opens).
+  const setTransmitting = useCallback((enabled) => {
+    rtcRef.current?.setTransmitting?.(enabled);
+  }, []);
+
+  return { hostGroup, joinGroup, leaveGroup, toggleMute, localStream, localLevelRef, setTransmitting };
 }
