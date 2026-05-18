@@ -34,7 +34,6 @@ const GENERIC_NAMES = new Set(['iphone', 'ipad', 'ipod', 'simulator', '']);
 
 export function HomeScreen({ onHost, onJoin, busy = false }) {
   const [name, setName] = useState('');
-  const [password, setPassword] = useState('');
   const [micGranted, setMicGranted] = useState(true); // optimistic — hides card until check completes
   const [micAsked, setMicAsked] = useState(false);    // becomes true after the user has tapped Allow at least once
   const [requestingMic, setRequestingMic] = useState(false);
@@ -179,8 +178,11 @@ export function HomeScreen({ onHost, onJoin, busy = false }) {
     setMicLevel(0);
     try {
       // Route playback through the loudspeaker instead of the earpiece.
+      // `auto: true` engages MODE_IN_COMMUNICATION on Android so the voice
+      // stream is fully active — without it, playback through the WebRTC
+      // remote track is noticeably quieter than during a real group call.
       try {
-        InCallManager.start({ media: 'audio' });
+        InCallManager.start({ media: 'audio', auto: true });
         InCallManager.setForceSpeakerphoneOn(true);
         incallActiveRef.current = true;
       } catch (_) { /* ignore — monitor still works, just quieter */ }
@@ -361,17 +363,6 @@ export function HomeScreen({ onHost, onJoin, busy = false }) {
         autoCapitalize="words"
       />
 
-      {Platform.OS === 'android' && (
-        <TextInput
-          style={styles.input}
-          placeholder="Host's hotspot password (Join only)"
-          placeholderTextColor="#666"
-          value={password}
-          onChangeText={setPassword}
-          autoCapitalize="none"
-          autoCorrect={false}
-        />
-      )}
       {Platform.OS === 'ios' && iosHotspotOn === false && (
         <Text style={styles.iosHint}>
           iOS host: enable Personal Hotspot in Settings first, then tap Create.
@@ -450,22 +441,13 @@ export function HomeScreen({ onHost, onJoin, busy = false }) {
             );
             return;
           }
-          if (Platform.OS === 'android' && password.length < 8) {
-            Alert.alert(
-              'Hotspot password required',
-              "Enter the host's hotspot password (≥8 chars) so we can connect to their WiFi.",
-            );
-            return;
-          }
           stopMicTest();
-          onJoin(name.trim(), password);
+          onJoin(name.trim());
         }}
       >
         <Text style={styles.btnText}>{busy ? 'Joining…' : 'Join Group'}</Text>
         <Text style={styles.btnSub}>
-          {Platform.OS === 'android'
-            ? 'Scans for RideLink hotspot'
-            : 'Connect to host hotspot in WiFi settings first'}
+          Connect to host hotspot in WiFi settings first
         </Text>
       </TouchableOpacity>
     </ScrollView>

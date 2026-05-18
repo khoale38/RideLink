@@ -62,11 +62,11 @@ function App() {
     }
   };
 
-  const handleJoin = async (name: string, password: string) => {
+  const handleJoin = async (name: string) => {
     if (busy) return;
     setBusy(true);
     try {
-      await joinGroup(name, password);
+      await joinGroup(name);
       setScreen('group');
     } catch (err: any) {
       // See handleHost — joinGroup already cleans up on failure.

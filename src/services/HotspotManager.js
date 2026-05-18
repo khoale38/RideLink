@@ -1,7 +1,7 @@
 /**
- * WiFi hotspot helpers.
- * Android: can scan SSIDs with react-native-wifi-reborn (needs ACCESS_FINE_LOCATION).
- * iOS: cannot programmatically create/scan hotspots — user does it manually.
+ * WiFi hotspot helpers. The guest joins the host's hotspot via system WiFi
+ * settings on both platforms; we only need to detect the live gateway IP
+ * from our WiFi address and probe whether iOS Personal Hotspot is active.
  */
 import { Platform } from 'react-native';
 import WifiManager from 'react-native-wifi-reborn';
@@ -85,20 +85,6 @@ export async function isIOSHotspotActive() {
   });
 }
 
-export async function requestLocationPermission() {
-  if (Platform.OS !== 'android') return true;
-  const { PermissionsAndroid } = await import('react-native');
-  const result = await PermissionsAndroid.request(
-    PermissionsAndroid.PERMISSIONS.ACCESS_FINE_LOCATION,
-    {
-      title: 'Location permission',
-      message: 'RideLink needs location access to scan for nearby hotspots.',
-      buttonPositive: 'Allow',
-    },
-  );
-  return result === PermissionsAndroid.RESULTS.GRANTED;
-}
-
 // Best-effort silent check of mic permission status. We can't fully distinguish
 // "undetermined" from "denied" on iOS without an extra dependency. On iOS we
 // always re-probe via getUserMedia rather than caching at module scope — a
@@ -142,40 +128,3 @@ export async function requestMicPermission() {
   }
 }
 
-export async function scanForRideLinkHotspot() {
-  if (Platform.OS === 'ios') return null; // iOS can't scan SSIDs
-  try {
-    const networks = await WifiManager.loadWifiList();
-    return networks.find((n) => n.SSID?.startsWith(HOTSPOT_PREFIX)) ?? null;
-  } catch {
-    return null;
-  }
-}
-
-const CONNECT_TIMEOUT_MS = 20000;
-
-export async function connectToHotspot(ssid, password) {
-  if (Platform.OS === 'ios') return false;
-  if (!password) {
-    if (__DEV__) console.warn('[HotspotManager] connectToHotspot called without a password');
-    return false;
-  }
-  // WifiManager.connectToProtectedSSID can hang indefinitely if WiFi state is
-  // stuck (radio off, captive portal, etc.). Race it against a timeout so the
-  // UI doesn't sit on "Joining…" forever.
-  let timer;
-  const timeout = new Promise((_, reject) => {
-    timer = setTimeout(() => reject(new Error('WiFi connect timed out')), CONNECT_TIMEOUT_MS);
-  });
-  try {
-    await Promise.race([
-      WifiManager.connectToProtectedSSID(ssid, password, false, false),
-      timeout,
-    ]);
-    return true;
-  } catch {
-    return false;
-  } finally {
-    clearTimeout(timer);
-  }
-}

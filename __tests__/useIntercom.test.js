@@ -27,10 +27,7 @@ jest.mock('../src/services/SignalingServer', () => ({
 jest.mock('../src/services/HotspotManager', () => ({
   resolveGatewayIP: jest.fn().mockResolvedValue('192.168.43.1'),
   resolveGatewayIPVerbose: jest.fn().mockResolvedValue({ gateway: '192.168.43.1', source: 'wifi' }),
-  requestLocationPermission: jest.fn().mockResolvedValue(true),
   requestMicPermission: jest.fn().mockResolvedValue(true),
-  scanForRideLinkHotspot: jest.fn().mockResolvedValue({ SSID: 'RideLink-Test' }),
-  connectToHotspot: jest.fn().mockResolvedValue(true),
 }));
 
 jest.mock('../src/services/IntercomService', () => ({
@@ -85,7 +82,7 @@ test('joinGroup throws a clear error when no hotspot subnet is detected (fallbac
   resolveGatewayIPVerbose.mockResolvedValueOnce({ gateway: '192.168.43.1', source: 'fallback', wifiIp: '10.0.0.42' });
   const { result } = renderHook(() => useIntercom(makeStore()));
   await expect(
-    act(async () => { await result.current.joinGroup('Alice', 'password123'); }),
+    act(async () => { await result.current.joinGroup('Alice'); }),
   ).rejects.toThrow(/not connected to a RideLink hotspot/i);
 });
 

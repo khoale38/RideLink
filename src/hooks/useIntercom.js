@@ -6,10 +6,7 @@ import { WebRTCManager } from '../services/WebRTCManager';
 import { startSignalingServer, stopSignalingServer, SIGNALING_PORT } from '../services/SignalingServer';
 import {
   resolveGatewayIPVerbose,
-  requestLocationPermission,
   requestMicPermission,
-  scanForRideLinkHotspot,
-  connectToHotspot,
 } from '../services/HotspotManager';
 import { startIntercomService, stopIntercomService } from '../services/IntercomService';
 import { startLocalHotspot, stopLocalHotspot } from '../services/LocalHotspot';
@@ -146,12 +143,8 @@ export function useIntercom(store, { onKicked } = {}) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }), [store, _cleanupSession]);
 
-  const joinGroup = useCallback((name, password) => withSessionLock(async () => {
+  const joinGroup = useCallback((name) => withSessionLock(async () => {
     try {
-      if (Platform.OS === 'android') {
-        const locationOk = await requestLocationPermission();
-        if (!locationOk) throw new Error('Location permission denied (needed to scan WiFi)');
-      }
       const micOk = await requestMicPermission();
       if (!micOk) throw new Error('Microphone permission denied');
 
@@ -164,26 +157,18 @@ export function useIntercom(store, { onKicked } = {}) {
       store.setRole('guest');
       store.setMyName(name);
 
-      if (Platform.OS === 'android') {
-        if (!password || password.length < 8) {
-          throw new Error('Hotspot password is required to join the host\'s WiFi');
-        }
-        const network = await scanForRideLinkHotspot();
-        if (!network) throw new Error('No RideLink hotspot found nearby');
-        const connected = await connectToHotspot(network.SSID, password);
-        if (!connected) throw new Error(`Failed to connect to ${network.SSID}`);
-      }
-
-      await startIntercomService(`RideLink (${name})`);
+      // Unified flow on both platforms: the user joins the host's hotspot in
+      // system WiFi settings first. We just resolve the live gateway from our
+      // WiFi IP — works for Android host (LocalOnlyHotspot) and iOS host
+      // (Personal Hotspot) alike. No SSID prefix scan, no programmatic
+      // password join — Android's connectToProtectedSSID is unreliable on
+      // modern releases anyway.
       const { gateway, source } = await resolveGatewayIPVerbose();
-      // 'fallback' means we have a WiFi IP but it didn't match a known
-      // hotspot subnet (e.g. dev on a corporate 10.x net). 'error' means
-      // WifiManager threw outright. In both cases the hardcoded gateway
-      // is almost certainly unreachable — surface that instead of timing
-      // out the TCP connect 20s later.
       if (source !== 'wifi') {
         throw new Error('Not connected to a RideLink hotspot. Connect to the host\'s WiFi first, then try again.');
       }
+
+      await startIntercomService(`RideLink (${name})`);
       await _connect(gateway, name, store, {});
     } catch (err) {
       await _cleanupSession();
