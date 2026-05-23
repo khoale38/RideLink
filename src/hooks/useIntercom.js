@@ -20,6 +20,29 @@ export function useIntercom(store, { onKicked } = {}) {
   const signalingRef = useRef(null);
   const rtcRef = useRef(null);
   const hostingRef = useRef(false);
+  // Local-level fan-out: WebRTCManager emits per stats-tick audioLevel for
+  // the local source via the stats-only loopback pc. useVOX subscribes to
+  // this stream to drive self-speaking + the VOX gate. We keep listeners in
+  // a ref so the subscribe function's identity is stable across session
+  // (re)creation — otherwise every host/join would force useVOX's effect to
+  // re-run and restart calibration.
+  const localLevelListenersRef = useRef(new Set());
+  const subscribeLocalLevel = useCallback((cb) => {
+    if (typeof cb !== 'function') return () => {};
+    const set = localLevelListenersRef.current;
+    set.add(cb);
+    return () => { set.delete(cb); };
+  }, []);
+  const emitLocalLevel = useCallback((level) => {
+    // Listener throws must not stop the fan-out: a buggy/late VOX hook
+    // shouldn't suppress the indicator for everyone else (today there's only
+    // one subscriber, but the API doesn't forbid more).
+    for (const cb of localLevelListenersRef.current) {
+      try { cb(level); } catch (err) {
+        logger.warn('useIntercom', 'localLevel listener threw', { error: err?.message ?? String(err) });
+      }
+    }
+  }, []);
   // Serialises session lifecycle calls. Tapping "Host" immediately after
   // "Leave" used to race startSignalingServer against the still-closing
   // listener (EADDRINUSE) — the lock makes the second call wait for the
@@ -275,6 +298,7 @@ export function useIntercom(store, { onKicked } = {}) {
         logger.error('useIntercom', errInfo.error, { stage: errInfo.stage, peerId: errInfo.peerId });
       },
       (peerId, state) => storeRef.setPeerConnectionState(peerId, state),
+      emitLocalLevel,
     );
     rtcRef.current = rtc;
 
@@ -311,5 +335,5 @@ export function useIntercom(store, { onKicked } = {}) {
     rtcRef.current?.setTransmitting?.(enabled);
   }, []);
 
-  return { hostGroup, joinGroup, leaveGroup, toggleMute, localStream, setTransmitting };
+  return { hostGroup, joinGroup, leaveGroup, toggleMute, localStream, setTransmitting, subscribeLocalLevel };
 }

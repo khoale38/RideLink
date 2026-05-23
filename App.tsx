@@ -11,7 +11,7 @@ import { ErrorBoundary } from './src/components/ErrorBoundary';
 
 function App() {
   const store = useGroupStore();
-  const { hostGroup, joinGroup, leaveGroup, toggleMute, localStream, setTransmitting } = useIntercom(store, {
+  const { hostGroup, joinGroup, leaveGroup, toggleMute, localStream, setTransmitting, subscribeLocalLevel } = useIntercom(store, {
     onKicked: async (reason: 'host_closed_room' | 'connection_lost') => {
       // Await teardown so a user tapping Host/Join immediately after the alert
       // dismisses doesn't race a still-running signaling server / FG service.
@@ -32,16 +32,24 @@ function App() {
   // Run VOX whenever we're in a group (not just when voxEnabled), so the
   // self-speaking indicator works even with VOX off. Transmission is gated
   // separately below via vox.transmit + voxEnabled.
-  const vox = useVOX(localStream, screen === 'group' && !store.muted);
+  //
+  // Level source is the stats-only loopback inside WebRTCManager (surfaced
+  // via subscribeLocalLevel). Same `media-source.audioLevel` pipe regardless
+  // of platform, so iOS and Android behave identically — the previous PCM
+  // monitor via react-native-audio-record returned zeros on Android because
+  // its `MIC` AudioRecord lost arbitration against WebRTC's
+  // `VOICE_COMMUNICATION` client, and the gate stayed shut forever.
+  const vox = useVOX(subscribeLocalLevel, screen === 'group' && !store.muted);
 
   // Single source of truth for whether outbound mic audio reaches peers.
   // - muted: never transmit
   // - VOX off: always transmit
   // - VOX on: transmit only while VOX gate is open (vox.transmit)
   //
-  // We gate at the peer-sender level (replaceTrack) rather than on the source
-  // track. Disabling the source would zero out media-source audioLevel and
-  // deadlock VOX — level=0 forever → gate never opens → border never lights.
+  // We gate at the peer-sender level (replaceTrack). The stats-only loopback
+  // pc inside WebRTCManager keeps the source track attached to a (silent)
+  // sender so `media-source.audioLevel` keeps reporting even while every
+  // real peer's sender is null — preventing the gate-closed deadlock.
   useEffect(() => {
     const desired = screen === 'group' && !store.muted && (!voxEnabled || vox.transmit);
     setTransmitting(desired);

@@ -17,5 +17,15 @@
         <domain includeSubdomains="false">172.20.10.1</domain>
         <domain includeSubdomains="false">10.0.0.1</domain>
     </domain-config>
+    <!-- Metro dev-server reachability. `localhost` is what adb-reverse
+         bridges to `127.0.0.1:8081`; `10.0.2.2` is the standard emulator
+         alias for the host. Lives at top level (not <debug-overrides>) —
+         that element rejects nested <domain-config> at parse time. Harmless
+         in release: nothing listens on Metro there, so the allowlist just
+         widens what's permitted-but-unused. -->
+    <domain-config cleartextTrafficPermitted="true">
+        <domain includeSubdomains="false">localhost</domain>
+        <domain includeSubdomains="false">10.0.2.2</domain>
+    </domain-config>
     <base-config cleartextTrafficPermitted="false" />
 </network-security-config>

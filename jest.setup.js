@@ -43,12 +43,3 @@ jest.mock('react-native-incall-manager', () => ({
   },
 }));
 
-jest.mock('react-native-audio-record', () => ({
-  __esModule: true,
-  default: {
-    init: jest.fn(),
-    start: jest.fn(),
-    stop: jest.fn().mockResolvedValue(''),
-    on: jest.fn(),
-  },
-}));

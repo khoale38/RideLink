@@ -861,6 +861,55 @@ test('callPeer respects a closed transmit gate by replacing the sender track wit
   rtc.destroy();
 });
 
+test('speaking poll emits onLocalLevel from media-source audioLevel', async () => {
+  // Replaces the prior react-native-audio-record path that returned zeros on
+  // Android because RNAR's MIC AudioRecord lost arbitration against WebRTC's
+  // VOICE_COMMUNICATION client. Reading `media-source.audioLevel` from a
+  // stats-only loopback pc gives identical numbers on both platforms.
+  jest.useFakeTimers();
+  const pc = makePc();
+  // Synthesize a media-source stats report shaped like a real getStats() Map.
+  pc.getStats = jest.fn().mockResolvedValue(new Map([
+    ['ms-1', { type: 'media-source', kind: 'audio', audioLevel: 0.42 }],
+  ]));
+  RTCPeerConnection.mockImplementation(() => pc);
+  const signaling = makeSignaling();
+  const onLocalLevel = jest.fn();
+  const rtc = new WebRTCManager(signaling, jest.fn(), jest.fn(), jest.fn(), onLocalLevel);
+  // Stand in for the loopback pc that startLocalAudio() builds — bypassing
+  // the real getUserMedia flow keeps this unit-scoped.
+  rtc.localStatsPcLocal = pc;
+
+  // Advance through one speaking-poll tick (300ms fast cadence).
+  await jest.advanceTimersByTimeAsync(310);
+
+  expect(onLocalLevel).toHaveBeenCalledWith(0.42);
+  rtc.destroy();
+  jest.useRealTimers();
+});
+
+test('onLocalLevel still fires when there are zero real peers (level pipe is independent)', async () => {
+  // Regression guard: VOX needs the level pipe to be live BEFORE the first
+  // peer connects so calibration can complete on the host's side while they
+  // wait for a guest. The loopback pc is independent of this.peers.
+  jest.useFakeTimers();
+  const pc = makePc();
+  pc.getStats = jest.fn().mockResolvedValue(new Map([
+    ['ms-1', { type: 'media-source', kind: 'audio', audioLevel: 0.1 }],
+  ]));
+  RTCPeerConnection.mockImplementation(() => pc);
+  const signaling = makeSignaling();
+  const onLocalLevel = jest.fn();
+  const rtc = new WebRTCManager(signaling, jest.fn(), jest.fn(), jest.fn(), onLocalLevel);
+  rtc.localStatsPcLocal = pc;
+  expect(rtc.peers.size).toBe(0);
+
+  await jest.advanceTimersByTimeAsync(310);
+  expect(onLocalLevel).toHaveBeenCalledWith(0.1);
+  rtc.destroy();
+  jest.useRealTimers();
+});
+
 test('live offer arriving during replay drain is routed onto the same chain', async () => {
   // Regression guard for the parallel-race bug: a live offer arriving while
   // setMyId() is draining the pendingOffers buffer must hand off onto the

@@ -16,7 +16,6 @@
     "qrcode-generator": "^2.0.4",
     "react": "19.2.3",
     "react-native": "0.85.3",
-    "react-native-audio-record": "^0.2.2",
     "react-native-device-info": "^15.0.2",
     "react-native-get-random-values": "^2.0.0",
     "react-native-incall-manager": "^4.2.0",

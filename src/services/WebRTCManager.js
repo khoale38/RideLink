@@ -50,6 +50,7 @@ import {
   RTCIceCandidate,
   mediaDevices,
 } from 'react-native-webrtc';
+import { buildLoopbackPair } from './MicLoopback';
 import { logger } from './logger';
 
 const RTC_CONFIG = {
@@ -105,22 +106,36 @@ class PeerEntry {
 }
 
 export class WebRTCManager {
-  constructor(signalingClient, onVoiceActivity, onError, onPeerState) {
+  constructor(signalingClient, onVoiceActivity, onError, onPeerState, onLocalLevel) {
     this.signaling = signalingClient;
     this.onVoiceActivity = onVoiceActivity;
     this.onError = onError;
     this.onPeerState = onPeerState; // (peerId, state) — 'connecting' | 'connected' | 'failed'
+    // (audioLevel 0..1) — emitted once per stats tick from the local-stats loopback pc.
+    // Drives the self-speaking indicator AND useVOX gate decisions, replacing the
+    // prior react-native-audio-record path (which gave zeroed buffers on Android
+    // because Android arbitrates concurrent AudioRecord clients and WebRTC's
+    // VOICE_COMMUNICATION source took priority).
+    this.onLocalLevel = onLocalLevel;
     this.peers = new Map(); // peerId -> PeerEntry
     this.localStream = null;
+    // Stats-only local loopback. Holds the source track on a sender so
+    // `media-source.audioLevel` keeps reporting even when every real peer's
+    // sender is gated to null via setTransmitting(false). Without this, VOX
+    // would deadlock the moment it gated itself closed — see the comment in
+    // setTransmitting about why we can't gate the source track itself.
+    this.localStatsPcLocal = null;
+    this.localStatsPcRemote = null;
     this.destroyed = false;
     this.myId = null; // set by setMyId() — used for polite-peer tie-break on glare
 
     this.speakingPoll = null;
     // Per-peer transmit gate. Toggling each peer pc's audio sender via
     // replaceTrack(null|track) lets us silence outbound audio without
-    // touching the source track itself — local mic capture stays live so
-    // useVOX's PCM monitor (react-native-audio-record) keeps producing
-    // levels even while VOX is gated closed.
+    // touching the source track itself — the stats-only loopback pc keeps
+    // the source attached to a (silent) sender so `media-source.audioLevel`
+    // reports continuously, which is what useVOX needs to detect speech and
+    // re-open the gate.
     this.transmitting = true;
     // Offers that arrived before setMyId() — replayed once we know our id so
     // the glare tie-break in _handleOffer is symmetric on both peers.
@@ -198,6 +213,29 @@ export class WebRTCManager {
         } catch (_) { /* getStats can throw mid-teardown; ignore */ }
       }
       if (this.destroyed) return;
+      // Local level from the stats-only loopback pc. Read once per tick so the
+      // cadence (300ms fast / 600ms slow) is shared with the remote-speaker
+      // poll above. Skipped silently if the stats pc isn't up yet (e.g.
+      // startLocalAudio still in flight) or has been torn down.
+      if (this.localStatsPcLocal && this.onLocalLevel) {
+        try {
+          const stats = await this.localStatsPcLocal.getStats();
+          if (this.destroyed) return;
+          let localLevel = 0;
+          stats.forEach((report) => {
+            // `media-source` reports the live source track's audioLevel
+            // regardless of whether any sender is actually transmitting it —
+            // exactly what we need so VOX can drive itself open from a gated-
+            // closed state. `outbound-rtp` would zero out the moment we gate.
+            if (report.type === 'media-source' && (report.kind === 'audio' || report.mediaType === 'audio')) {
+              if (typeof report.audioLevel === 'number' && report.audioLevel > localLevel) {
+                localLevel = report.audioLevel;
+              }
+            }
+          });
+          safeNotify(this.onLocalLevel, 'onLocalLevel', localLevel);
+        } catch (_) { /* getStats can throw mid-teardown; ignore */ }
+      }
       const nextMs = this.peers.size > 4 ? slowMs : fastMs;
       if (nextMs !== currentMs) {
         logger.warn('WebRTC', `speaking poll cadence → ${nextMs}ms`, { peers: this.peers.size });
@@ -291,6 +329,26 @@ export class WebRTCManager {
         readyState: track?.readyState,
         label: track?.label,
       });
+      // Stand up the stats-only loopback. Silent (remote receiver disabled
+      // by buildLoopbackPair when audible=false) — its only job is to keep
+      // the source track attached to a sender so `media-source.audioLevel`
+      // reports continuously, including while every real peer's sender is
+      // gated to null by setTransmitting(false). Failure here is non-fatal:
+      // if the loopback can't be built, the self-speaking indicator and VOX
+      // fall back to "no level data" (calibrationFailed → fail-open
+      // transmit) rather than blocking the call.
+      try {
+        const { pcLocal, pcRemote } = await buildLoopbackPair(this.localStream, { audible: false });
+        if (this.destroyed) {
+          try { pcLocal?.close(); } catch (_) { /* ignore */ }
+          try { pcRemote?.close(); } catch (_) { /* ignore */ }
+        } else {
+          this.localStatsPcLocal = pcLocal;
+          this.localStatsPcRemote = pcRemote;
+        }
+      } catch (err) {
+        this._reportError('localStatsLoopback', err, null, /* fatal */ false);
+      }
       return this.localStream;
     } catch (err) {
       this._reportError('getUserMedia', err);
@@ -888,6 +946,13 @@ export class WebRTCManager {
     });
     this.peers.clear();
     this.pendingOffers = [];
+    // Close the stats-only loopback BEFORE stopping the source tracks so the
+    // pc's encoder thread doesn't briefly observe a dead source on the way
+    // down — harmless in practice but generates noisy native logs.
+    try { this.localStatsPcLocal?.close(); } catch (_) { /* ignore */ }
+    try { this.localStatsPcRemote?.close(); } catch (_) { /* ignore */ }
+    this.localStatsPcLocal = null;
+    this.localStatsPcRemote = null;
     this.localStream?.getTracks().forEach((t) => {
       try { t.stop(); } catch (_) { /* ignore */ }
     });

@@ -1957,8 +1957,6 @@ PODS:
   - ReactNativeDependencies (0.85.3)
   - ReactNativeIncallManager (4.2.1):
     - React-Core
-  - RNAudioRecord (0.2.2):
-    - React
   - RNDeviceInfo (15.0.2):
     - React-Core
   - RNWifi (4.13.6):
@@ -2048,7 +2046,6 @@ DEPENDENCIES:
   - ReactCommon/turbomodule/core (from `../node_modules/react-native/ReactCommon`)
   - ReactNativeDependencies (from `../node_modules/react-native/third-party-podspecs/ReactNativeDependencies.podspec`)
   - ReactNativeIncallManager (from `../node_modules/react-native-incall-manager`)
-  - RNAudioRecord (from `../node_modules/react-native-audio-record`)
   - RNDeviceInfo (from `../node_modules/react-native-device-info`)
   - RNWifi (from `../node_modules/react-native-wifi-reborn`)
   - Yoga (from `../node_modules/react-native/ReactCommon/yoga`)
@@ -2222,8 +2219,6 @@ EXTERNAL SOURCES:
     :podspec: "../node_modules/react-native/third-party-podspecs/ReactNativeDependencies.podspec"
   ReactNativeIncallManager:
     :path: "../node_modules/react-native-incall-manager"
-  RNAudioRecord:
-    :path: "../node_modules/react-native-audio-record"
   RNDeviceInfo:
     :path: "../node_modules/react-native-device-info"
   RNWifi:
@@ -2315,7 +2310,6 @@ SPEC CHECKSUMS:
   ReactCommon: 7dfc3250793bf36cf221096ff59e1179e13eef7f
   ReactNativeDependencies: 0ee8dc3379b939d755f4832aa0664f8f6fa91eff
   ReactNativeIncallManager: dccd3e7499caa3bb73d3acfedf4fb0360f1a87d5
-  RNAudioRecord: b253d15d8141c5ef6bc614fc9d9f06577870bfc3
   RNDeviceInfo: 4c852998208b60dc192ae3529e5867817719ad1e
   RNWifi: 6669d0fe0f82592d64383d0d4ac1ff888d15f8bc
   Yoga: 77dfa8673de2874e1855002ae59c68b8be9b007b
