@@ -728,21 +728,60 @@ test('malformed offer payload is rejected without crashing', async () => {
   rtc.destroy();
 });
 
-test('setMyId is idempotent against double-call with the same id', async () => {
-  // Reconnect paths can fire setMyId twice for the same yourId; the second
-  // call must not re-enter the replay path (pendingOffers is already empty
-  // but the no-op early-exit makes the contract explicit).
+test('setMyId re-call with the same id still drains pendingOffers', async () => {
+  // The signaling server is free to reissue the same clientId across a
+  // reconnect. setMyId deliberately does NOT short-circuit on same-id — an
+  // early return would strand any offers buffered since resetPeers() (see
+  // the comment in setMyId).
   const pc = makePc();
   RTCPeerConnection.mockImplementation(() => pc);
   const signaling = makeSignaling();
   const rtc = new WebRTCManager(signaling, jest.fn(), jest.fn(), jest.fn(), jest.fn());
   rtc.setMyId('peer-a');
   expect(rtc.myId).toBe('peer-a');
-  // Mutate to detect a re-run (would be cleared by a real setMyId path).
   rtc.pendingOffers.push({ from: 'peer-b', sdp: { type: 'offer', sdp: 'x' } });
   rtc.setMyId('peer-a');
-  // Second call should be a no-op — pendingOffers stays as we placed it.
-  expect(rtc.pendingOffers).toHaveLength(1);
+  // Replay is async; flush microtasks so the buffered offer is applied.
+  await new Promise((r) => setImmediate(r));
+  expect(rtc.pendingOffers).toHaveLength(0);
+  expect(signaling.send).toHaveBeenCalledWith(
+    expect.objectContaining({ type: 'answer', to: 'peer-b' }),
+  );
+  rtc.destroy();
+});
+
+test('renegotiation offer on an existing stable pc does not re-add tracks or tear down', async () => {
+  // Regression: an ICE-restart offer lands while the pc is in 'stable'. The
+  // old code re-ran addTrack on the existing pc — react-native-webrtc throws
+  // 'Track already exists in a sender' — and _handleOffer's catch tore the
+  // peer down instead of answering the restart.
+  const track = { kind: 'audio' };
+  const pc = makePc();
+  pc.addTrack = jest.fn((t) => {
+    if (pc.addTrack.mock.calls.length > 1) throw new Error('Track already exists in a sender');
+    return { track: t, replaceTrack: jest.fn() };
+  });
+  RTCPeerConnection.mockImplementation(() => pc);
+  const signaling = makeSignaling();
+  const rtc = new WebRTCManager(signaling, jest.fn(), jest.fn(), jest.fn(), jest.fn());
+  rtc.setMyId('peer-a'); // smaller id — the side that receives the elected restart offer
+  rtc.localStream = { getAudioTracks: () => [track], getTracks: () => [track] };
+
+  // Initial handshake: remote offer creates the pc and attaches the track once.
+  await rtc._handleOffer({ from: 'peer-b', sdp: { type: 'offer', sdp: 'v1' } });
+  expect(pc.addTrack).toHaveBeenCalledTimes(1);
+  expect(entryOf(rtc, 'peer-b')).toBeTruthy();
+  signaling.send.mockClear();
+
+  // ICE-restart offer arrives on the now-stable pc.
+  await rtc._handleOffer({ from: 'peer-b', sdp: { type: 'offer', sdp: 'v2-restart' } });
+
+  expect(pc.addTrack).toHaveBeenCalledTimes(1); // no duplicate attach
+  expect(entryOf(rtc, 'peer-b')).toBeTruthy();  // peer survives
+  expect(pc.close).not.toHaveBeenCalled();
+  expect(signaling.send).toHaveBeenCalledWith(
+    expect.objectContaining({ type: 'answer', to: 'peer-b' }),
+  );
   rtc.destroy();
 });
 

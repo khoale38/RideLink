@@ -369,10 +369,47 @@ export class WebRTCManager {
           if (s.track && s.track.kind !== 'audio') continue;
           // Some senders start with track === null (transceivers added before
           // addTrack); only flip audio senders we own.
-          try { s.replaceTrack?.(this.transmitting ? (track ?? null) : null); }
-          catch (err) { this._reportError('setTransmitting.replaceTrack', err, entry.id, /* fatal */ false); }
+          this._safeReplaceTrack(s, this.transmitting ? (track ?? null) : null, entry.id);
         }
       } catch (_) { /* ignore */ }
+    }
+  }
+
+  // replaceTrack returns a promise on real builds; a rejection would slip past
+  // try/catch (which only covers the synchronous throw) as an unhandled
+  // rejection.
+  _safeReplaceTrack(sender, track, peerId) {
+    if (!sender?.replaceTrack) return;
+    try {
+      const p = sender.replaceTrack(track);
+      if (p && typeof p.catch === 'function') {
+        p.catch((err) => this._reportError('replaceTrack', err, peerId, /* fatal */ false));
+      }
+    } catch (err) {
+      this._reportError('replaceTrack', err, peerId, /* fatal */ false);
+    }
+  }
+
+  // Attach local tracks exactly once, at pc creation. Re-running addTrack on
+  // an existing pc (renegotiation / ICE-restart offer landing in 'stable')
+  // throws 'Track already exists in a sender' — or, when the transmit gate
+  // has replaced the sender track with null, silently creates a duplicate
+  // sender. Both used to tear down a healthy peer from _handleOffer's catch.
+  _attachLocalTracks(entry) {
+    if (!this.localStream) return;
+    try {
+      this.localStream.getTracks().forEach((t) => {
+        const sender = entry.pc.addTrack(t, this.localStream);
+        // Respect the current transmit gate (VOX closed / muted) so a peer
+        // joining mid-silence doesn't get the pre-gate frames.
+        if (!this.transmitting && t.kind === 'audio') {
+          this._safeReplaceTrack(sender, null, entry.id);
+        }
+      });
+    } catch (err) {
+      // Fresh-pc addTrack should never throw; if it somehow does, the pc
+      // still works receive-only and the watchdog/ICE machinery applies.
+      this._reportError('attachLocalTracks', err, entry.id, /* fatal */ false);
     }
   }
 
@@ -385,14 +422,6 @@ export class WebRTCManager {
     const entry = this._createPeerConnection(peerId);
     if (!entry) return;
     try {
-      this.localStream?.getTracks().forEach((t) => {
-        const sender = entry.pc.addTrack(t, this.localStream);
-        // If the rider is currently gated closed (VOX silent / muted), start
-        // this sender with no track so we don't leak the pre-gate frames.
-        if (!this.transmitting && t.kind === 'audio') {
-          try { sender?.replaceTrack?.(null); } catch (_) { /* ignore */ }
-        }
-      });
       const offer = await entry.pc.createOffer();
       if (!this._isFresh(peerId, entry)) return;
       await entry.pc.setLocalDescription(offer);
@@ -591,14 +620,6 @@ export class WebRTCManager {
     // can't leave the pc parked in 'have-remote-offer' forever.
     this._armOfferWatchdog(entry);
     try {
-      this.localStream?.getTracks().forEach((t) => {
-        const sender = entry.pc.addTrack(t, this.localStream);
-        // Mirror callPeer: respect the current transmit gate so a rejoin
-        // mid-silence doesn't accidentally start sending.
-        if (!this.transmitting && t.kind === 'audio') {
-          try { sender?.replaceTrack?.(null); } catch (_) { /* ignore */ }
-        }
-      });
       await entry.pc.setRemoteDescription(new RTCSessionDescription(msg.sdp));
       // Identity guard: a glare-rebuild or _removePeer during the awaits may
       // have swapped or evicted this entry. Mirrors the guards in callPeer /
@@ -727,6 +748,7 @@ export class WebRTCManager {
 
     const pc = new RTCPeerConnection(RTC_CONFIG);
     const entry = new PeerEntry(peerId, pc);
+    this._attachLocalTracks(entry);
 
     pc.onicecandidate = ({ candidate }) => {
       // Identity check: a torn-down pc can still emit a trailing candidate

@@ -91,6 +91,11 @@ export function GroupScreen({ store, vox, voxEnabled, onToggleVox, onMuteToggle,
   // the user must match manually in Settings.
   const activeSSID = hotspotSsid || suggestSSID(myName);
   const activePassword = hotspotPassword || '';
+  // Only render the QR / password when we hold real OS-provided credentials.
+  // On iOS (and Android when LocalOnlyHotspot fails) we'd otherwise show a
+  // WPA QR for a guessed SSID with an empty password — scanning it can never
+  // join the actual hotspot.
+  const hasRealCreds = !!(hotspotSsid && hotspotPassword);
 
   // Latching state for the mesh-size warning. Arm at >=6, clear at <=4 so
   // a flapping peer at the boundary doesn't toggle the orange banner every
@@ -123,24 +128,30 @@ export function GroupScreen({ store, vox, voxEnabled, onToggleVox, onMuteToggle,
             <View style={styles.hotspotText}>
               <Text style={styles.hotspotLabel}>Hotspot name</Text>
               <Text style={styles.hotspotValue}>{activeSSID}</Text>
-              <Text style={[styles.hotspotLabel, styles.hotspotLabelSpaced]}>Password</Text>
-              <Text style={styles.hotspotValue}>{activePassword}</Text>
+              {hasRealCreds && (
+                <>
+                  <Text style={[styles.hotspotLabel, styles.hotspotLabelSpaced]}>Password</Text>
+                  <Text style={styles.hotspotValue}>{activePassword}</Text>
+                </>
+              )}
               <Text style={styles.iosNote}>
                 {Platform.OS === 'ios'
-                  ? 'iOS: Settings → Personal Hotspot — turn it on (rename your device to match if needed).'
-                  : hotspotSsid
+                  ? 'iOS: Settings → Personal Hotspot — turn it on (rename your device to match if needed). Riders get the password from you.'
+                  : hasRealCreds
                     ? 'Hotspot started automatically. Guests scan the QR to join.'
-                    : 'Android: Settings → Network → Hotspot — match the SSID and password above.'}
+                    : 'Android: Settings → Network → Hotspot — use the SSID above and share your hotspot password with riders.'}
               </Text>
             </View>
-            <View style={styles.qrWrapper}>
-              <WifiQrCode
-                ssid={activeSSID}
-                password={activePassword}
-                size={130}
-              />
-              <Text style={styles.qrCaption}>Scan to join WiFi</Text>
-            </View>
+            {hasRealCreds && (
+              <View style={styles.qrWrapper}>
+                <WifiQrCode
+                  ssid={activeSSID}
+                  password={activePassword}
+                  size={130}
+                />
+                <Text style={styles.qrCaption}>Scan to join WiFi</Text>
+              </View>
+            )}
           </View>
         </View>
       )}

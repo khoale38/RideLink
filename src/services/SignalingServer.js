@@ -233,7 +233,13 @@ export function stopSignalingServer() {
   server = null;
   const stopPromise = new Promise((resolve) => {
     let settled = false;
-    const done = () => { if (!settled) { settled = true; resolve(); } };
+    let fallback = null;
+    const done = () => {
+      if (settled) return;
+      settled = true;
+      if (fallback) { clearTimeout(fallback); fallback = null; }
+      resolve();
+    };
     try {
       closing.close(() => done());
     } catch (_) {
@@ -244,8 +250,9 @@ export function stopSignalingServer() {
     // guaranteed to fire if there are no active connections. Cap the wait
     // at 3s so leaveGroup never hangs — the EADDRINUSE bind-retry in
     // startSignalingServer covers the case where the port hasn't actually
-    // released by the time we hand control to the next caller.
-    setTimeout(done, 3000);
+    // released by the time we hand control to the next caller. Guarded on
+    // `settled` in case close() completed synchronously above.
+    if (!settled) fallback = setTimeout(done, 3000);
   });
   // Chain onto any existing pendingStop so a rapid stop→start→stop cascade
   // serializes correctly — overwriting pendingStop unconditionally would

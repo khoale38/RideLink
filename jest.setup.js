@@ -1,3 +1,4 @@
+/* eslint-env jest */
 jest.mock('react-native-keep-awake', () => ({
   __esModule: true,
   default: { activate: jest.fn(), deactivate: jest.fn() },
